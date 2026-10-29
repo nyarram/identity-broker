@@ -1,0 +1,7 @@
+plugins {
+    // Downloads a JDK 21 toolchain if the machine running Gradle has an older JDK
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+rootProject.name = 'agent-identity-broker'
+include 'broker', 'orders-api'

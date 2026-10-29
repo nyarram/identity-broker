@@ -1,0 +1,21 @@
+server:
+  port: 9000
+
+spring:
+  application:
+    name: broker
+  datasource:
+    url: ${BROKER_DB_URL:jdbc:postgresql://localhost:5432/broker}
+    username: ${BROKER_DB_USER:broker}
+    password: ${BROKER_DB_PASSWORD:broker}
+
+broker:
+  issuer: ${BROKER_ISSUER:http://localhost:9000}
+  admin-token: ${BROKER_ADMIN_TOKEN:}
+  # Where the ES256 signing key is kept. If unset, a key is generated in memory on every start.
+  signing-key-file: ${BROKER_SIGNING_KEY_FILE:}
+  access-token-ttl: 5m
+  # Resource servers the broker issues tokens for, and the scopes each one understands
+  resources:
+    - id: ${ORDERS_API_AUDIENCE:https://orders-api.example}
+      scopes: [orders:read, orders:refund, orders:cancel, orders:delete]

@@ -1,0 +1,9 @@
+**/build/
+.gradle/
+.git/
+.github/
+.idea/
+docs/
+scripts/
+node_modules/
+.env

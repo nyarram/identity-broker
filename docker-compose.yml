@@ -1,0 +1,70 @@
+name: agent-identity-broker
+
+# Ports are bound to 127.0.0.1 only. The defaults below are for local development;
+# copy .env.example to .env to override them.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: broker
+      POSTGRES_USER: broker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-broker-dev-password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U broker -d broker"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  broker:
+    build:
+      context: .
+      args:
+        SERVICE: broker
+    environment:
+      BROKER_DB_URL: jdbc:postgresql://postgres:5432/broker
+      BROKER_DB_USER: broker
+      BROKER_DB_PASSWORD: ${POSTGRES_PASSWORD:-broker-dev-password}
+      BROKER_ISSUER: ${BROKER_ISSUER:-http://broker:9000}
+      BROKER_ADMIN_TOKEN: ${BROKER_ADMIN_TOKEN:-dev-admin-token-not-for-production}
+      BROKER_SIGNING_KEY_FILE: /var/lib/broker/signing-key.json
+      ORDERS_API_AUDIENCE: https://orders-api.example
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - broker-keys:/var/lib/broker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:9000/oauth2/jwks"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  orders-api:
+    build:
+      context: .
+      args:
+        SERVICE: orders-api
+    environment:
+      ORDERS_ISSUER: ${BROKER_ISSUER:-http://broker:9000}
+      ORDERS_JWK_SET_URI: http://broker:9000/oauth2/jwks
+      ORDERS_API_AUDIENCE: https://orders-api.example
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      broker:
+        condition: service_healthy
+    healthcheck:
+      # No public endpoints: a 401 without a token means the API is up
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:8081/orders/1042 | grep -q 401"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+volumes:
+  pgdata:
+  broker-keys:

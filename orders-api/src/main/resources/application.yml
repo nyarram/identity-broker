@@ -1,0 +1,12 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: orders-api
+
+orders:
+  # Must match the broker's issuer and the resource id agents request tokens for
+  issuer: ${ORDERS_ISSUER:http://localhost:9000}
+  audience: ${ORDERS_API_AUDIENCE:https://orders-api.example}
+  jwk-set-uri: ${ORDERS_JWK_SET_URI:http://localhost:9000/oauth2/jwks}
