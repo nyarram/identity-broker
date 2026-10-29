@@ -101,6 +101,15 @@ public class PolicyEngine {
                 : "Forbidden by " + String.join(", ", new TreeSet<>(forbidding)));
     }
 
+    /** Re-checks a request a human has approved: permitted only if policy allows it with approval. */
+    public Decision evaluateApproved(String agentId, ActionRequest request, TaskScope task) {
+        Optional<AuthorizationSuccessResponse> response = authorize(agentId, request, task, true);
+        if (response.isPresent() && response.get().isAllowed()) {
+            return new Decision(Outcome.PERMIT, "Permitted with human approval by " + ids(response.get()));
+        }
+        return new Decision(Outcome.DENY, "Policy no longer permits: " + request.describe());
+    }
+
     private Optional<AuthorizationSuccessResponse> authorize(
             String agentId, ActionRequest request, TaskScope task, boolean humanApproved) {
         Map<String, Value> context = new HashMap<>();

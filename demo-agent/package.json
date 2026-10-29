@@ -1,0 +1,14 @@
+{
+  "name": "@aib/demo-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An LLM customer-support agent whose every tool call goes through the identity broker, plus the four-scene demo.",
+  "scripts": {
+    "demo": "tsx src/demo.ts"
+  },
+  "dependencies": {
+    "@aib/agent-sdk": "*",
+    "@anthropic-ai/sdk": "1.3.0"
+  }
+}

@@ -67,3 +67,35 @@ Decisions made while building, with the reason and the trade-off. Newest last.
 **`invalid_client` responses carry only the error code, with 401,** as Spring does by default, so a caller cannot probe which agents exist. The audit log keeps the full reason.
 
 **Policy hot-reload is not implemented.** The spec asks for reload on file change in dev; restarting the broker takes a few seconds, and a reload path is one more thing that can load an unvalidated policy.
+
+## M3
+
+**Approvals are bound to the exact request and used once.** An approval stores a hash of the agent, delegation, resource and `authorization_details`; a retry must match it exactly, so approving a $120 refund on order 1045 cannot be stretched to $130 or to another order. Consuming it is a conditional update, so two concurrent retries cannot both get a token. The policy is re-checked (with `human_approved = true`) on redemption, so a policy change in the meantime still applies.
+
+**The approval flow follows the device flow (RFC 8628).** The token endpoint answers `authorization_pending` with an `approval_id`, `expires_in` and `interval`; the agent polls `GET /approvals/{id}` and retries the exchange with `approval_id` once the status changes. Polling the status endpoint instead of the token endpoint keeps the audit log free of one denial per poll. Retries of the same request reuse the pending approval rather than opening new ones.
+
+**`GET /approvals/{id}` needs no authentication.** The id is 80 random bits and the response holds only the status and expiry. Requiring private_key_jwt here would add a second client-authentication path for no information gain.
+
+**Decision and collection windows:** a human has 10 minutes to decide; after approval the agent has 5 minutes to collect its token. An expired approval is derived from `expires_at`, never stored, so expiry needs no background job.
+
+**Approving is an admin action in v1.** Anyone with the admin token can approve, and `decided_by` is self-reported. The roadmap's OIDC login would let only the delegating human approve. Listed in the threat model.
+
+**Only resource servers can introspect, and only tokens issued for them.** Spring's introspection lets any authenticated client introspect any token. A wrapper returns `active: false` unless the caller is a configured resource server and the token's audience is that resource. Agents and other APIs learn nothing.
+
+**Resource servers authenticate with a client secret** (`client_secret_basic`, stored as a bcrypt hash). The no-shared-secrets rule is about agents, the untrusted party; the Orders API is infrastructure, and a secret keeps its configuration to one environment variable. Spring requires a grant type on every client, so these clients carry `client_credentials`, but the broker refuses to issue tokens through anything except token exchange.
+
+**Three levels of revocation, all through introspection:** a token (`POST /admin/tokens/{jti}/revoke`), a delegation (`POST /admin/delegations/{id}/revoke`, which also stops new exchanges) and an agent (`POST /admin/agents/{id}/disable`, which also stops client authentication). Agents can revoke their own tokens through RFC 7009 `/oauth2/revoke`. Every revocation is audited.
+
+**The Orders API introspects before writes only, and fails closed.** Reads are validated locally and rely on the 5-minute lifetime; a revoked token can keep reading until it expires (tested, and in the threat model). If the broker cannot be reached, writes are refused with 503.
+
+**Error responses must pass the Orders API's own security rules.** Spring renders error statuses through `/error`; with `denyAll()` as the fallback rule every 401, 409 and 422 turned into a 403. `/error` is now permitted, with a regression test.
+
+**The demo's `--no-broker` mode uses a real all-access key on the Orders API** (`Authorization: ApiKey ...`), enabled only when `ORDERS_DEMO_API_KEY` is set. The same key resets the mock orders between runs. It exists to show the contrast and is off by default outside Compose.
+
+**`--replay` scripts the model, not the system.** The recorded turns (`demo-agent/fixtures/replay.json`) are what the model says and which tools it calls; every tool call still goes through the real SDK, broker, policy, API and audit log. Scene 4's recording follows the injected note on purpose, playing a compromised agent. `--record <file>` captures a live model's turns in the same format.
+
+**The live demo defaults to `claude-opus-5-5`** (override with `DEMO_MODEL`), with server-side refusal fallback on (`fallbacks: "default"`). A current model will often ignore the injected note, which is good for users and dull for a demo; `--gullible` adds a system-prompt line telling the agent to follow staff notes in orders, to simulate a badly configured agent. The broker's containment does not depend on either.
+
+**The agent SDK has no runtime dependencies.** Node's `crypto` signs ES256 assertions (`dsaEncoding: "ieee-p1363"` for JOSE's raw signature format) and `fetch` does the rest. The TypeScript packages run from source with `tsx`, so there is no build step.
+
+**Node 22 is the minimum,** not the spec's 20: Vitest 5 requires Node 22.12 or later.

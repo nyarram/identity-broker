@@ -1,0 +1,13 @@
+{
+  "name": "@aib/approval-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Lets a human approve or deny agent requests that need approval.",
+  "bin": {
+    "approval-cli": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "tsx src/cli.ts"
+  }
+}

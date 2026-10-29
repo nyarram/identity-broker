@@ -8,6 +8,7 @@ const BROKER = process.env.BROKER_URL ?? "http://localhost:9000";
 const ORDERS = process.env.ORDERS_URL ?? "http://localhost:8081";
 const ORDERS_AUDIENCE = "https://orders-api.example";
 const ADMIN_TOKEN = process.env.BROKER_ADMIN_TOKEN ?? "dev-admin-token-not-for-production";
+const DEMO_KEY = process.env.ORDERS_DEMO_API_KEY ?? "demo-static-key-not-for-production";
 
 let failures = 0;
 function check(name, ok, detail = "") {
@@ -57,6 +58,13 @@ async function waitFor(name, probe, seconds = 120) {
 await waitFor("broker", async () => (await fetch(`${BROKER}/oauth2/jwks`)).ok);
 await waitFor("orders-api", async () => (await fetch(`${ORDERS}/orders/1042`)).status === 401);
 
+// Start from the seeded orders, so repeated runs see the same data
+const reset = await fetch(`${ORDERS}/admin/reset`, { method: "POST", headers: { Authorization: `ApiKey ${DEMO_KEY}` } });
+if (!reset.ok) {
+  console.log(`Could not reset orders (${reset.status}); set ORDERS_DEMO_API_KEY to match Compose.`);
+  process.exit(1);
+}
+
 const metadata = (await request("GET", `${BROKER}/.well-known/oauth-authorization-server`)).data;
 const tokenAudience = metadata.token_endpoint; // assertion audience uses the issuer's view of the URL
 console.log(`Broker issuer: ${metadata.issuer}\n`);
@@ -71,7 +79,7 @@ async function registerAgent(name) {
 }
 
 // Each token is for one action, described by one RFC 9396 authorization_details entry
-async function exchange(agent, subjectToken, scope, detail) {
+async function exchange(agent, subjectToken, scope, detail, approvalId) {
   return request("POST", `${BROKER}/oauth2/token`, {
     form: {
       grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
@@ -83,6 +91,7 @@ async function exchange(agent, subjectToken, scope, detail) {
       resource: ORDERS_AUDIENCE,
       scope,
       authorization_details: JSON.stringify([detail]),
+      ...(approvalId ? { approval_id: approvalId } : {}),
     },
   });
 }
@@ -138,8 +147,10 @@ check("policy: reading an order outside the task is denied", outOfTask.data.erro
 const del = await exchange(agent, delegationToken, "orders:delete", { type: "delete", order_id: "1042" });
 check("policy: delete is denied even though the delegation lists it", del.data.error === "access_denied",
   `${del.status} ${JSON.stringify(del.data)}`);
-const bigRefund = await exchange(agent, delegationToken, "orders:refund", { type: "refund", order_id: "1042", max_amount_cents: 12000 });
-check("policy: a $120 refund is not issued without approval", bigRefund.data.error === "access_denied",
+const bigRefundAction = { type: "refund", order_id: "1042", max_amount_cents: 9000 };
+const bigRefund = await exchange(agent, delegationToken, "orders:refund", bigRefundAction);
+check("policy: a $90 refund waits for human approval (authorization_pending)",
+  bigRefund.data.error === "authorization_pending" && bigRefund.data.approval_id?.startsWith("apr_"),
   `${bigRefund.status} ${JSON.stringify(bigRefund.data)}`);
 
 const refundGrant = await exchange(agent, delegationToken, "orders:refund", { type: "refund", order_id: "1042", max_amount_cents: 3000 });
@@ -158,7 +169,34 @@ const stolen = await exchange(rogue, delegationToken, "orders:read", { type: "re
 check("another agent cannot use the delegation", stolen.status === 400 && stolen.data.error === "invalid_grant",
   `${stolen.status} ${JSON.stringify(stolen.data)}`);
 
-// 7. Everything above is in the tamper-evident audit log
+// 7. A human approves the $90 refund; the retry with the approval id gets the token
+const approvalId = bigRefund.data.approval_id;
+const approval = await request("POST", `${BROKER}/admin/approvals/${approvalId}/approve`, { bearer: ADMIN_TOKEN, json: { decided_by: "smoke-test" } });
+check("approval: a human approves it", approval.data.status === "approved", JSON.stringify(approval.data));
+const approvedGrant = await exchange(agent, delegationToken, "orders:refund", bigRefundAction, approvalId);
+check("approval: the retry with approval_id gets the token", approvedGrant.status === 200, JSON.stringify(approvedGrant.data));
+const approvedRefund = await request("POST", `${ORDERS}/orders/1042/refund`, { bearer: approvedGrant.data.access_token, json: { amount_cents: 9000 } });
+check("approval: the $90 refund succeeds", approvedRefund.status === 200, `got ${approvedRefund.status}`);
+const reused = await exchange(agent, delegationToken, "orders:refund", bigRefundAction, approvalId);
+check("approval: the approval cannot be used twice", reused.data.error === "invalid_grant", JSON.stringify(reused.data));
+
+// 8. Revocation: the Orders API asks the broker (introspection) before every write
+const smallRefund = { type: "refund", order_id: "1042", max_amount_cents: 100 };
+const toRevoke = (await exchange(agent, delegationToken, "orders:refund", smallRefund)).data.access_token;
+await request("POST", `${BROKER}/admin/tokens/${decode(toRevoke, 1).jti}/revoke`, { bearer: ADMIN_TOKEN });
+const revokedWrite = await request("POST", `${ORDERS}/orders/1042/refund`, { bearer: toRevoke, json: { amount_cents: 100 } });
+check("revocation: a revoked token's next write fails (401)", revokedWrite.status === 401, `got ${revokedWrite.status}`);
+
+// 9. Kill switch: disabling the agent deactivates all its tokens
+const beforeDisable = (await exchange(agent, delegationToken, "orders:refund", smallRefund)).data.access_token;
+await request("POST", `${BROKER}/admin/agents/${agent.id}/disable`, { bearer: ADMIN_TOKEN });
+const disabledWrite = await request("POST", `${ORDERS}/orders/1042/refund`, { bearer: beforeDisable, json: { amount_cents: 100 } });
+check("kill switch: a disabled agent's next write fails (401)", disabledWrite.status === 401, `got ${disabledWrite.status}`);
+const afterDisable = await exchange(agent, delegationToken, "orders:read", { type: "read", order_id: "1042" });
+check("kill switch: a disabled agent cannot get new tokens", afterDisable.data.error === "invalid_client",
+  `${afterDisable.status} ${JSON.stringify(afterDisable.data)}`);
+
+// 10. Everything above is in the tamper-evident audit log
 const events = [];
 for (let after = 0; after !== null; ) {
   const page = await request("GET", `${BROKER}/admin/audit?limit=500&after=${after}`, { bearer: ADMIN_TOKEN });
@@ -166,9 +204,11 @@ for (let after = 0; after !== null; ) {
   after = page.data.next_after ?? null;
 }
 const ours = events.filter((e) => e.delegation_id === delegation.data.delegation_id);
-const issued = ours.filter((e) => e.event_type === "token_issued").length;
-const denied = ours.filter((e) => e.event_type === "token_denied").length;
-check("audit: issued and denied tokens are recorded", issued === 2 && denied === 4, `issued=${issued} denied=${denied}`);
+const count = (type) => ours.filter((e) => e.event_type === type).length;
+check("audit: issued, denied, approval and revocation events are recorded",
+  count("token_issued") === 5 && count("token_denied") === 6 && count("approval_requested") === 1
+    && count("approved") === 1 && count("token_revoked") === 1,
+  ["token_issued", "token_denied", "approval_requested", "approved", "token_revoked"].map((t) => `${t}=${count(t)}`).join(" "));
 const verify = await request("GET", `${BROKER}/admin/audit/verify`, { bearer: ADMIN_TOKEN });
 check("audit: hash chain verifies", verify.data.valid === true, JSON.stringify(verify.data));
 

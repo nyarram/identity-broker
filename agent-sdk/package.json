@@ -1,0 +1,10 @@
+{
+  "name": "@aib/agent-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Client for agents: proves identity with private_key_jwt and exchanges a delegation for per-action access tokens.",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

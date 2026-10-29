@@ -2,6 +2,7 @@ package dev.aib.broker.tokens;
 
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import dev.aib.broker.agents.AgentClientRepository;
 import dev.aib.broker.audit.AuditLog;
 import dev.aib.broker.audit.AuditLog.EventType;
 import dev.aib.broker.audit.AuditLog.NewEvent;
@@ -24,7 +25,7 @@ import org.springframework.security.oauth2.server.authorization.OAuth2Authorizat
 import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationService;
 import org.springframework.security.oauth2.server.authorization.OAuth2TokenType;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
-import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
+
 import org.springframework.security.oauth2.server.authorization.settings.OAuth2TokenFormat;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -44,7 +45,7 @@ public class BrokerAuthorizationService implements OAuth2AuthorizationService {
 
     private final DelegationRepository delegations;
     private final IssuedTokenRepository issuedTokens;
-    private final RegisteredClientRepository clients;
+    private final AgentClientRepository clients;
     private final AuditLog audit;
     private final TransactionTemplate transactions;
     private final Clock clock;
@@ -52,7 +53,7 @@ public class BrokerAuthorizationService implements OAuth2AuthorizationService {
     BrokerAuthorizationService(
             DelegationRepository delegations,
             IssuedTokenRepository issuedTokens,
-            RegisteredClientRepository clients,
+            AgentClientRepository clients,
             AuditLog audit,
             TransactionTemplate transactions,
             Clock clock) {
@@ -98,6 +99,11 @@ public class BrokerAuthorizationService implements OAuth2AuthorizationService {
                 audit.append(new NewEvent(EventType.TOKEN_ISSUED, issued.agentId(), issued.userId(),
                         issued.delegationId(), issued.jti(), issuedRequest(claims), "permit",
                         GrantHolder.get().map(ExchangeRules.Grant::policyReason).orElse(null)));
+            } else {
+                // The agent revoked its own token through /oauth2/revoke (RFC 7009)
+                audit.append(new NewEvent(EventType.TOKEN_REVOKED, issued.agentId(), issued.userId(),
+                        issued.delegationId(), issued.jti(), Map.of("endpoint", "/oauth2/revoke"), null,
+                        "Revoked by the agent"));
             }
         });
     }
@@ -139,7 +145,7 @@ public class BrokerAuthorizationService implements OAuth2AuthorizationService {
         if (!d.isActive(clock.instant())) {
             return null; // Expired or revoked delegations are treated as unknown: invalid_grant
         }
-        RegisteredClient agent = clients.findById(d.agentId());
+        RegisteredClient agent = clients.findAgent(d.agentId());
         if (agent == null) {
             return null; // Agent unknown or disabled, so its delegations are unusable
         }
@@ -159,11 +165,15 @@ public class BrokerAuthorizationService implements OAuth2AuthorizationService {
                 .build();
     }
 
+    /** Unknown, i.e. inactive, once its agent is disabled; invalidated once it or its delegation is revoked. */
     private OAuth2Authorization fromIssuedToken(IssuedToken t, String tokenValue) {
-        RegisteredClient agent = clients.findById(t.agentId());
+        RegisteredClient agent = clients.findAgent(t.agentId());
         if (agent == null) {
             return null;
         }
+        boolean delegationRevoked = delegations.findById(t.delegationId())
+                .map(d -> d.revokedAt() != null)
+                .orElse(true);
         OAuth2AccessToken token = new OAuth2AccessToken(
                 OAuth2AccessToken.TokenType.BEARER, tokenValue, t.issuedAt(), t.expiresAt(), t.scopes());
         return OAuth2Authorization.withRegisteredClient(agent)
@@ -175,7 +185,8 @@ public class BrokerAuthorizationService implements OAuth2AuthorizationService {
                 .token(token, metadata -> {
                     metadata.put(OAuth2Authorization.Token.CLAIMS_METADATA_NAME, claimsMap(parseStoredClaims(t.claimsJson())));
                     metadata.put(OAuth2TokenFormat.class.getName(), OAuth2TokenFormat.SELF_CONTAINED.getValue());
-                    metadata.put(OAuth2Authorization.Token.INVALIDATED_METADATA_NAME, t.revokedAt() != null);
+                    metadata.put(OAuth2Authorization.Token.INVALIDATED_METADATA_NAME,
+                            t.revokedAt() != null || delegationRevoked);
                 })
                 .build();
     }

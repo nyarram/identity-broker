@@ -11,25 +11,45 @@ import org.springframework.security.oauth2.jose.jws.SignatureAlgorithm;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.oauth2.server.resource.introspection.OpaqueTokenIntrospector;
+import org.springframework.security.oauth2.server.resource.introspection.SpringOpaqueTokenIntrospector;
+import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
 import org.springframework.security.web.SecurityFilterChain;
 
 @Configuration
 class SecurityConfig {
 
+    /**
+     * @param clientId and clientSecret authenticate this API to the broker's introspection endpoint
+     * @param demoApiKey enables the all-access static key used by the demo's --no-broker mode; blank disables it
+     */
     @ConfigurationProperties("orders")
-    record OrdersProperties(String issuer, String audience, String jwkSetUri) {}
+    record OrdersProperties(
+            String issuer,
+            String audience,
+            String jwkSetUri,
+            String introspectionUri,
+            String clientId,
+            String clientSecret,
+            String demoApiKey) {}
 
     @Bean
-    SecurityFilterChain api(HttpSecurity http) throws Exception {
+    SecurityFilterChain api(HttpSecurity http, OrdersProperties properties) throws Exception {
         http.authorizeHttpRequests(a -> a
+                        // Error responses (401, 409, 422, ...) are rendered by /error; denying it would turn them all into 403
+                        .requestMatchers("/error").permitAll()
                         .requestMatchers(HttpMethod.GET, "/orders", "/orders/*").hasAuthority("SCOPE_orders:read")
                         .requestMatchers(HttpMethod.POST, "/orders/*/refund").hasAuthority("SCOPE_orders:refund")
                         .requestMatchers(HttpMethod.POST, "/orders/*/cancel").hasAuthority("SCOPE_orders:cancel")
                         .requestMatchers(HttpMethod.DELETE, "/orders/*").hasAuthority("SCOPE_orders:delete")
+                        .requestMatchers(HttpMethod.POST, "/admin/reset").hasRole("DEMO")
                         .anyRequest().denyAll())
                 .oauth2ResourceServer(o -> o.jwt(Customizer.withDefaults()))
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .csrf(c -> c.disable());
+        if (properties.demoApiKey() != null && !properties.demoApiKey().isBlank()) {
+            http.addFilterBefore(new DemoKeyFilter(properties.demoApiKey()), BearerTokenAuthenticationFilter.class);
+        }
         return http.build();
     }
 
@@ -49,5 +69,14 @@ class SecurityConfig {
                 .audience(properties.audience())
                 .build());
         return decoder;
+    }
+
+    /** Asks the broker whether a token is still active before every write (RFC 7662). */
+    @Bean
+    OpaqueTokenIntrospector introspector(OrdersProperties properties) {
+        return SpringOpaqueTokenIntrospector.withIntrospectionUri(properties.introspectionUri())
+                .clientId(properties.clientId())
+                .clientSecret(properties.clientSecret())
+                .build();
     }
 }

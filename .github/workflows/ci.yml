@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   test:
-    name: Unit and integration tests
+    name: Java unit and integration tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,17 +27,35 @@ jobs:
           name: test-reports
           path: "**/build/reports/tests/"
 
-  compose-smoke:
-    name: Docker Compose smoke test
+  typescript:
+    name: Agent SDK, CLI and demo (typecheck + Vitest)
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  compose-smoke:
+    name: Docker Compose smoke test and demo
+    runs-on: ubuntu-latest
+    needs: [test, typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
       - run: docker compose up -d --build --wait
       - run: node scripts/smoke-test.mjs
+      # Fails if scene 4's injection gets past the broker
+      - run: npm run demo -- --replay
+      - run: npm run demo -- --replay --no-broker
       - name: Service logs
         if: failure()
         run: docker compose logs

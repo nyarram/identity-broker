@@ -35,6 +35,8 @@ services:
       BROKER_ADMIN_TOKEN: ${BROKER_ADMIN_TOKEN:-dev-admin-token-not-for-production}
       BROKER_SIGNING_KEY_FILE: /var/lib/broker/signing-key.json
       ORDERS_API_AUDIENCE: https://orders-api.example
+      # The Orders API's credential for token introspection
+      ORDERS_API_CLIENT_SECRET: ${ORDERS_API_CLIENT_SECRET:-orders-api-dev-secret}
     ports:
       - "127.0.0.1:9000:9000"
     volumes:
@@ -56,7 +58,12 @@ services:
     environment:
       ORDERS_ISSUER: ${BROKER_ISSUER:-http://broker:9000}
       ORDERS_JWK_SET_URI: http://broker:9000/oauth2/jwks
+      ORDERS_INTROSPECTION_URI: http://broker:9000/oauth2/introspect
+      ORDERS_API_CLIENT_SECRET: ${ORDERS_API_CLIENT_SECRET:-orders-api-dev-secret}
       ORDERS_API_AUDIENCE: https://orders-api.example
+      # All-access static key, only for the demo's --no-broker contrast and order resets.
+      # Set it to an empty value to turn it off.
+      ORDERS_DEMO_API_KEY: ${ORDERS_DEMO_API_KEY-demo-static-key-not-for-production}
     ports:
       - "127.0.0.1:8081:8081"
     depends_on:

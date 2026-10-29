@@ -16,7 +16,7 @@ $$;
 ALTER ROLE ${app_role} WITH LOGIN PASSWORD '${app_password}';
 
 GRANT USAGE ON SCHEMA public TO ${app_role};
-GRANT SELECT, INSERT, UPDATE ON agents, delegations, issued_tokens TO ${app_role};
+GRANT SELECT, INSERT, UPDATE ON agents, delegations, issued_tokens, approvals TO ${app_role};
 
 REVOKE ALL ON audit_events FROM ${app_role};
 GRANT SELECT, INSERT ON audit_events TO ${app_role};

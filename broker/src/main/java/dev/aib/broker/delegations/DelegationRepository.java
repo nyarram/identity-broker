@@ -57,11 +57,11 @@ public class DelegationRepository {
                 .optional();
     }
 
-    public void revoke(String id, Instant at) {
-        jdbc.sql("update delegations set revoked_at = :at where id = :id and revoked_at is null")
+    public boolean revoke(String id, Instant at) {
+        return jdbc.sql("update delegations set revoked_at = :at where id = :id and revoked_at is null")
                 .param("at", Timestamp.from(at))
                 .param("id", id)
-                .update();
+                .update() == 1;
     }
 
     private static String toJson(TaskScope scope) {

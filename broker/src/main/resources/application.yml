@@ -29,3 +29,6 @@ broker:
   resources:
     - id: ${ORDERS_API_AUDIENCE:https://orders-api.example}
       scopes: [orders:read, orders:refund, orders:cancel, orders:delete]
+      # The Orders API authenticates as this client to introspect tokens before writes
+      client-id: orders-api
+      client-secret: ${ORDERS_API_CLIENT_SECRET:orders-api-dev-secret}

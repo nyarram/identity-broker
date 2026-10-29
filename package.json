@@ -1,0 +1,25 @@
+{
+  "name": "agent-identity-broker",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "workspaces": [
+    "agent-sdk",
+    "approval-cli",
+    "demo-agent"
+  ],
+  "scripts": {
+    "demo": "npm run --silent --workspace demo-agent demo --",
+    "approval-cli": "npm run --silent --workspace approval-cli start --",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

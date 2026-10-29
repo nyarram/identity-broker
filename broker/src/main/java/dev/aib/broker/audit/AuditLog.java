@@ -35,7 +35,9 @@ public class AuditLog {
     private static final long CHAIN_LOCK = 0x41_49_42_41_55_44_49_54L; // "AIBAUDIT"
 
     public enum EventType {
-        AGENT_REGISTERED, AGENT_DISABLED, DELEGATION_CREATED, TOKEN_ISSUED, TOKEN_DENIED;
+        AGENT_REGISTERED, AGENT_DISABLED, DELEGATION_CREATED, DELEGATION_REVOKED,
+        TOKEN_ISSUED, TOKEN_DENIED, TOKEN_REVOKED,
+        APPROVAL_REQUESTED, APPROVED, DENIED_BY_HUMAN;
 
         public String value() {
             return name().toLowerCase();

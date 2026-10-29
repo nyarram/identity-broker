@@ -7,6 +7,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 @ConfigurationProperties("broker")
 public record BrokerProperties(
@@ -17,8 +18,18 @@ public record BrokerProperties(
         String policyDir,
         List<Resource> resources) {
 
-    /** A resource server the broker issues tokens for (an RFC 8707 resource indicator). */
-    public record Resource(String id, Set<String> scopes) {}
+    /**
+     * A resource server the broker issues tokens for (an RFC 8707 resource indicator). The
+     * optional client credentials let it call token introspection (RFC 7662).
+     */
+    public record Resource(String id, Set<String> scopes, String clientId, String clientSecret) {
+        @ConstructorBinding
+        public Resource {}
+
+        public Resource(String id, Set<String> scopes) {
+            this(id, scopes, null, null);
+        }
+    }
 
     static final int MIN_ADMIN_TOKEN_LENGTH = 24;
     static final Duration MAX_ACCESS_TOKEN_TTL = Duration.ofMinutes(5);
@@ -42,6 +53,11 @@ public record BrokerProperties(
 
     public Optional<Resource> resource(String id) {
         return resources.stream().filter(r -> r.id().equals(id)).findFirst();
+    }
+
+    /** The resource server that authenticates as this introspection client, if any. */
+    public Optional<Resource> resourceForClient(String clientId) {
+        return resources.stream().filter(r -> clientId.equals(r.clientId())).findFirst();
     }
 
     public boolean isKnownResource(String id) {

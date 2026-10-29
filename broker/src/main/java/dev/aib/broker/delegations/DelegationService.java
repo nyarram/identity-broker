@@ -106,6 +106,17 @@ public class DelegationService {
         return summary;
     }
 
+    /** Revokes the delegation; every token issued from it becomes inactive at introspection. */
+    @Transactional
+    public Delegation revoke(String id) {
+        Delegation d = delegations.findById(id).orElseThrow(() -> ApiException.notFound("No delegation " + id));
+        if (delegations.revoke(id, clock.instant())) {
+            audit.append(new NewEvent(EventType.DELEGATION_REVOKED, d.agentId(), d.userId(), d.id(), null,
+                    Map.of(), null, "Revoked by admin"));
+        }
+        return delegations.findById(id).orElseThrow();
+    }
+
     private Set<String> validScopes(Agent agent, List<String> scopes) {
         if (scopes == null || scopes.isEmpty()) {
             throw ApiException.badRequest("scopes must list at least one scope");

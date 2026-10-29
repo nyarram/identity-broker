@@ -7,6 +7,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -39,6 +40,16 @@ class DelegationController {
 
     DelegationController(DelegationService delegations) {
         this.delegations = delegations;
+    }
+
+    record RevokedResponse(
+            @JsonProperty("delegation_id") String delegationId,
+            @JsonProperty("revoked_at") Instant revokedAt) {}
+
+    @PostMapping("/admin/delegations/{id}/revoke")
+    RevokedResponse revoke(@PathVariable String id) {
+        Delegation d = delegations.revoke(id);
+        return new RevokedResponse(d.id(), d.revokedAt());
     }
 
     @PostMapping("/delegations")

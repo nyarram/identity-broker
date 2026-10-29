@@ -50,6 +50,12 @@ class OrderStore {
         return orders.remove(id) != null;
     }
 
+    /** Puts every order back as seeded, so each demo run starts from the same data. */
+    synchronized void reset() {
+        orders.clear();
+        seed();
+    }
+
     private void seed() {
         add("1040", "cust_alice", "Wireless headphones", 8999, Status.DELIVERED, null);
         add("1041", "cust_alice", "Phone case", 1999, Status.DELIVERED, null);

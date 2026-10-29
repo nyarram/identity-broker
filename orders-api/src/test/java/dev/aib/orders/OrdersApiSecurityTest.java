@@ -24,7 +24,9 @@ import java.time.Instant;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
@@ -34,8 +36,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
 /**
- * Runs the Orders API with its real JWT decoder, pointed at a stub JWKS endpoint that
- * publishes a test "broker" key.
+ * Runs the Orders API with its real JWT decoder and introspection client, pointed at a stub
+ * broker that publishes a test key and answers introspection.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class OrdersApiSecurityTest {
@@ -43,14 +45,21 @@ class OrdersApiSecurityTest {
     static final String ISSUER = "http://broker.test";
     static final String AUDIENCE = "https://orders-api.example";
 
+    static final String DEMO_KEY = "test-demo-key";
+
     static final ECKey BROKER_KEY = generateKey("broker-key");
+    /** Tokens the stub broker reports as inactive, as if revoked. */
+    static final Set<String> REVOKED = ConcurrentHashMap.newKeySet();
     static final HttpServer JWKS = startJwksServer(BROKER_KEY);
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
+        String broker = "http://localhost:" + JWKS.getAddress().getPort();
         registry.add("orders.issuer", () -> ISSUER);
         registry.add("orders.audience", () -> AUDIENCE);
-        registry.add("orders.jwk-set-uri", () -> "http://localhost:" + JWKS.getAddress().getPort() + "/oauth2/jwks");
+        registry.add("orders.jwk-set-uri", () -> broker + "/oauth2/jwks");
+        registry.add("orders.introspection-uri", () -> broker + "/oauth2/introspect");
+        registry.add("orders.demo-api-key", () -> DEMO_KEY);
     }
 
     @AfterAll
@@ -225,7 +234,66 @@ class OrdersApiSecurityTest {
         assertThat(call("GET", "/orders/1042", token, null).statusCode()).isEqualTo(403);
     }
 
+    // ---- Error statuses survive Spring's /error dispatch ----
+
+    @Test
+    void businessErrorsKeepTheirStatus() throws Exception {
+        String token = refundToken("1043", 999999);
+
+        assertThat(call("POST", "/orders/1043/refund", token, "{\"amount_cents\":0}").statusCode()).isEqualTo(400);
+        assertThat(call("POST", "/orders/1043/refund", token, "{\"amount_cents\":999999}").statusCode()).isEqualTo(422);
+    }
+
+    // ---- Revocation: introspection before writes ----
+
+    @Test
+    void aRevokedTokenCannotWrite() throws Exception {
+        String token = refundToken("1046", 1000);
+        REVOKED.add(token);
+
+        HttpResponse<String> response = call("POST", "/orders/1046/refund", token, "{\"amount_cents\":1000}");
+
+        assertThat(response.statusCode()).isEqualTo(401);
+    }
+
+    @Test
+    void aRevokedTokenCanStillReadUntilItExpires() throws Exception {
+        // Reads are validated locally; the 5-minute lifetime bounds the exposure (see the threat model)
+        String token = token(c -> {});
+        REVOKED.add(token);
+
+        assertThat(call("GET", "/orders/1042", token, null).statusCode()).isEqualTo(200);
+    }
+
+    // ---- The demo's static key: everything is allowed ----
+
+    @Test
+    void theStaticDemoKeyCanDoAnything() throws Exception {
+        HttpResponse<String> other = callWithKey("GET", "/orders/1050", DEMO_KEY);
+        HttpResponse<String> delete = callWithKey("DELETE", "/orders/1059", DEMO_KEY);
+        HttpResponse<String> reset = callWithKey("POST", "/admin/reset", DEMO_KEY);
+
+        assertThat(other.statusCode()).isEqualTo(200);
+        assertThat(delete.statusCode()).isEqualTo(204);
+        assertThat(reset.statusCode()).isEqualTo(204);
+        assertThat(callWithKey("GET", "/orders/1059", DEMO_KEY).statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    void aWrongKeyOrABrokerTokenCannotReset() throws Exception {
+        assertThat(callWithKey("POST", "/admin/reset", "wrong-key").statusCode()).isEqualTo(401);
+        assertThat(call("POST", "/admin/reset", token(c -> {}), null).statusCode()).isEqualTo(403);
+    }
+
     // ---- Helpers ----
+
+    HttpResponse<String> callWithKey(String method, String path, String key) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
+                .method(method, HttpRequest.BodyPublishers.noBody())
+                .header("Authorization", "ApiKey " + key)
+                .build();
+        return http.send(request, HttpResponse.BodyHandlers.ofString());
+    }
 
     static List<Map<String, Object>> detail(String type, String orderId) {
         return List.of(Map.of("type", type, "order_id", orderId));
@@ -301,6 +369,18 @@ class OrdersApiSecurityTest {
                 exchange.getResponseHeaders().add("Content-Type", "application/json");
                 exchange.sendResponseHeaders(200, body.length);
                 exchange.getResponseBody().write(body);
+                exchange.close();
+            });
+            server.createContext("/oauth2/introspect", exchange -> {
+                String form = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                String token = java.net.URLDecoder.decode(form.replaceFirst("^.*token=([^&]*).*$", "$1"), StandardCharsets.UTF_8);
+                boolean authenticated = exchange.getRequestHeaders().getFirst("Authorization") != null;
+                byte[] response = (authenticated && !REVOKED.contains(token)
+                        ? "{\"active\":true,\"sub\":\"alice\"}"
+                        : "{\"active\":false}").getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().add("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, response.length);
+                exchange.getResponseBody().write(response);
                 exchange.close();
             });
             server.start();

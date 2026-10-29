@@ -1,12 +1,15 @@
 package dev.aib.broker.tokens;
 
 import com.nimbusds.jose.util.JSONArrayUtils;
+import dev.aib.broker.approvals.Approval;
+import dev.aib.broker.approvals.ApprovalService;
 import dev.aib.broker.config.BrokerProperties;
 import dev.aib.broker.delegations.Delegation;
 import dev.aib.broker.policy.ActionRequest;
 import dev.aib.broker.policy.ActionRequest.Action;
 import dev.aib.broker.policy.PolicyEngine;
 import dev.aib.broker.policy.PolicyEngine.Decision;
+import dev.aib.broker.policy.PolicyEngine.Outcome;
 import java.text.ParseException;
 import java.time.Instant;
 import java.util.List;
@@ -16,8 +19,9 @@ import org.springframework.stereotype.Component;
 
 /**
  * Decides what a token exchange may grant. Spring Authorization Server checks the client
- * and the subject token; these rules bind the result to the delegation and the policy.
- * Each token is for exactly one action, described by one authorization_details entry.
+ * and the subject token; these rules bind the result to the delegation, the policy and,
+ * where policy requires it, a human's approval. Each token is for exactly one action,
+ * described by one authorization_details entry.
  */
 @Component
 public class ExchangeRules {
@@ -29,7 +33,8 @@ public class ExchangeRules {
             Set<String> scopes,
             Set<String> resources,
             Set<String> audiences,
-            String authorizationDetails) {}
+            String authorizationDetails,
+            String approvalId) {}
 
     public record Grant(
             String audience,
@@ -57,12 +62,28 @@ public class ExchangeRules {
         }
     }
 
+    /** Not refused yet: a human must decide. The agent polls the approval, then retries with its id. */
+    public static class ApprovalPending extends Denied {
+        private final Approval approval;
+
+        ApprovalPending(Approval approval, String description) {
+            super("authorization_pending", description);
+            this.approval = approval;
+        }
+
+        public Approval approval() {
+            return approval;
+        }
+    }
+
     private final BrokerProperties properties;
     private final PolicyEngine policy;
+    private final ApprovalService approvals;
 
-    ExchangeRules(BrokerProperties properties, PolicyEngine policy) {
+    ExchangeRules(BrokerProperties properties, PolicyEngine policy, ApprovalService approvals) {
         this.properties = properties;
         this.policy = policy;
+        this.approvals = approvals;
     }
 
     /**
@@ -105,18 +126,56 @@ public class ExchangeRules {
             throw new Denied("invalid_scope", "Requested scope is not valid for " + resource);
         }
 
-        Decision decision = policy.evaluate(request.agentId(), action, delegation.taskScope());
-        switch (decision.outcome()) {
-            case PERMIT -> {}
-            // M3 turns this into authorization_pending with an approval request
-            case APPROVAL_REQUIRED -> throw new Denied("access_denied", decision.reason());
-            case DENY -> throw new Denied("access_denied", decision.reason());
-        }
+        String reason = request.approvalId() == null
+                ? decide(request.agentId(), delegation, resource, action)
+                : redeemApproval(request, delegation, resource, action, now);
 
         // A token never outlives the delegation it came from
         Instant expiresAt = defaultExpiry.isBefore(delegation.expiresAt()) ? defaultExpiry : delegation.expiresAt();
 
-        return new Grant(resource, Set.of(scope), action, expiresAt, decision.reason());
+        return new Grant(resource, Set.of(scope), action, expiresAt, reason);
+    }
+
+    /** First attempt: policy permits, denies, or sends the request to a human. */
+    private String decide(String agentId, Delegation delegation, String resource, ActionRequest action) {
+        Decision decision = policy.evaluate(agentId, action, delegation.taskScope());
+        return switch (decision.outcome()) {
+            case PERMIT -> decision.reason();
+            case DENY -> throw new Denied("access_denied", decision.reason());
+            case APPROVAL_REQUIRED -> {
+                Approval approval = approvals.requestOrReuse(agentId, delegation, resource, action, decision.reason());
+                throw new ApprovalPending(approval, decision.reason());
+            }
+        };
+    }
+
+    /**
+     * Retry with an approval id. The approval must be for this exact request, approved,
+     * unexpired and unused, and policy must still permit the request with approval.
+     */
+    private String redeemApproval(
+            Request request, Delegation delegation, String resource, ActionRequest action, Instant now) {
+        Approval approval = approvals.find(request.approvalId())
+                .orElseThrow(() -> new Denied("invalid_grant", "Unknown approval_id"));
+        String hash = ApprovalService.requestHash(request.agentId(), delegation.id(), resource, action);
+        if (!approval.requestHash().equals(hash)) {
+            throw new Denied("invalid_grant", "The approval was granted for a different request");
+        }
+        switch (approval.statusAt(now)) {
+            case PENDING -> throw new ApprovalPending(approval, "Still waiting for a human to decide");
+            case DENIED -> throw new Denied("access_denied", "A human denied this request");
+            case EXPIRED -> throw new Denied("access_denied", "The approval expired before it was used");
+            case USED -> throw new Denied("invalid_grant", "The approval has already been used");
+            case APPROVED -> {}
+        }
+        Decision decision = policy.evaluateApproved(request.agentId(), action, delegation.taskScope());
+        if (decision.outcome() != Outcome.PERMIT) {
+            throw new Denied("access_denied", decision.reason());
+        }
+        if (!approvals.consume(approval.id())) {
+            throw new Denied("invalid_grant", "The approval has already been used");
+        }
+        return decision.reason() + " (" + approval.id() + ", approved by " + approval.decidedBy() + ")";
     }
 
     /** Parses the single RFC 9396 authorization_details entry; unknown fields are rejected. */

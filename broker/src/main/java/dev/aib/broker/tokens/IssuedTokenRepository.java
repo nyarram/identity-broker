@@ -56,6 +56,20 @@ class IssuedTokenRepository {
                 .update();
     }
 
+    Optional<IssuedToken> findByJti(String jti) {
+        return jdbc.sql("select * from issued_tokens where jti = :jti")
+                .param("jti", jti)
+                .query(IssuedTokenRepository::map)
+                .optional();
+    }
+
+    boolean revoke(String jti, Instant at) {
+        return jdbc.sql("update issued_tokens set revoked_at = :at where jti = :jti and revoked_at is null")
+                .param("at", Timestamp.from(at))
+                .param("jti", jti)
+                .update() == 1;
+    }
+
     Optional<IssuedToken> findByTokenHash(String tokenHash) {
         return jdbc.sql("select * from issued_tokens where token_hash = :hash")
                 .param("hash", tokenHash)

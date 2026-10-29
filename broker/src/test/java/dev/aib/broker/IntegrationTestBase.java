@@ -98,6 +98,16 @@ public abstract class IntegrationTestBase {
         return send(HttpRequest.newBuilder(uri(path)).header("Authorization", "Bearer " + ADMIN_TOKEN).GET());
     }
 
+    /** For endpoints that return a JSON array. */
+    protected String getRawAsAdmin(String path) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder(uri(path)).header("Authorization", "Bearer " + ADMIN_TOKEN).GET().build();
+            return http.send(request, HttpResponse.BodyHandlers.ofString()).body();
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     protected Response postJson(String path, Map<String, Object> body, String bearer) {
         HttpRequest.Builder request = HttpRequest.newBuilder(uri(path))
                 .header("Content-Type", "application/json")
@@ -109,13 +119,23 @@ public abstract class IntegrationTestBase {
     }
 
     protected Response postForm(String path, Map<String, String> form) {
+        return postForm(path, form, null);
+    }
+
+    /** Form post with optional HTTP Basic client credentials, as a resource server sends them. */
+    protected Response postForm(String path, Map<String, String> form, String basicAuth) {
         String body = form.entrySet().stream()
                 .map(e -> URLEncoder.encode(e.getKey(), StandardCharsets.UTF_8) + "="
                         + URLEncoder.encode(e.getValue(), StandardCharsets.UTF_8))
                 .collect(Collectors.joining("&"));
-        return send(HttpRequest.newBuilder(uri(path))
+        HttpRequest.Builder request = HttpRequest.newBuilder(uri(path))
                 .header("Content-Type", "application/x-www-form-urlencoded")
-                .POST(HttpRequest.BodyPublishers.ofString(body)));
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        if (basicAuth != null) {
+            request.header("Authorization", "Basic " + java.util.Base64.getEncoder()
+                    .encodeToString(basicAuth.getBytes(StandardCharsets.UTF_8)));
+        }
+        return send(request);
     }
 
     private URI uri(String path) {

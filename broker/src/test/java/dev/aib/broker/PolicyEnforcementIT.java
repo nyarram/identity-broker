@@ -42,12 +42,14 @@ class PolicyEnforcementIT extends IntegrationTestBase {
     }
 
     @Test
-    void refundAboveFiftyDollarsIsNotIssuedWithoutApproval() {
+    void refundAboveFiftyDollarsWaitsForApproval() {
         TestAgent agent = registerAgent("support-bot");
 
         Response response = exchange(agent, delegationToken(agent, "orders:refund"), "orders:refund", refund("1042", 12000));
 
-        assertDenied(response, "Needs human approval");
+        assertThat(response.status()).isEqualTo(400);
+        assertThat(response.string("error")).isEqualTo("authorization_pending");
+        assertThat(response.string("approval_id")).startsWith("apr_");
     }
 
     @Test

@@ -6,18 +6,17 @@ import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
 import org.springframework.security.oauth2.jose.jws.SignatureAlgorithm;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
-import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
 import org.springframework.security.oauth2.server.authorization.settings.ClientSettings;
 import org.springframework.security.oauth2.server.authorization.settings.OAuth2TokenFormat;
 import org.springframework.security.oauth2.server.authorization.settings.TokenSettings;
 import org.springframework.stereotype.Component;
 
 /**
- * Exposes registered agents to Spring Authorization Server as OAuth clients. Agents can
- * only authenticate with private_key_jwt and only use the token exchange grant.
+ * Registered agents as OAuth clients. Agents can only authenticate with private_key_jwt and
+ * only use the token exchange grant.
  */
 @Component
-public class AgentClientRepository implements RegisteredClientRepository {
+public class AgentClientRepository {
 
     /** Client settings that carry the agent's registration through to the token pipeline. */
     public static final String PUBLIC_JWK = "aib.public-jwk";
@@ -31,19 +30,8 @@ public class AgentClientRepository implements RegisteredClientRepository {
         this.properties = properties;
     }
 
-    @Override
-    public void save(RegisteredClient registeredClient) {
-        throw new UnsupportedOperationException("Register agents through POST /admin/agents");
-    }
-
-    @Override
-    public RegisteredClient findById(String id) {
-        return findByClientId(id);
-    }
-
     /** Returns null for unknown or disabled agents, which fails client authentication. */
-    @Override
-    public RegisteredClient findByClientId(String clientId) {
+    public RegisteredClient findAgent(String clientId) {
         return agents.findById(clientId).filter(a -> !a.isDisabled()).map(this::toClient).orElse(null);
     }
 

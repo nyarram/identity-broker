@@ -6,11 +6,13 @@ import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 import dev.aib.broker.agents.AgentAssertionDecoderFactory;
 import dev.aib.broker.tokens.DenialAuditor;
+import dev.aib.broker.tokens.ResourceServerIntrospection;
 import java.time.Clock;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -47,7 +49,10 @@ class SecurityConfig {
     @Bean
     @Order(2)
     SecurityFilterChain authorizationServerChain(
-            HttpSecurity http, AgentAssertionDecoderFactory assertionDecoders, DenialAuditor denialAuditor)
+            HttpSecurity http,
+            AgentAssertionDecoderFactory assertionDecoders,
+            DenialAuditor denialAuditor,
+            BrokerProperties properties)
             throws Exception {
         http.oauth2AuthorizationServer(as -> as
                         .clientAuthentication(clientAuth -> clientAuth
@@ -58,9 +63,16 @@ class SecurityConfig {
                                 }))
                                 .authenticationSuccessHandler(DenialAuditor.rememberAuthenticatedAgent())
                                 .errorResponseHandler(denialAuditor))
-                        .tokenEndpoint(token -> token.errorResponseHandler(denialAuditor)))
+                        .tokenEndpoint(token -> token.errorResponseHandler(denialAuditor))
+                        .tokenIntrospectionEndpoint(introspection -> introspection.authenticationProviders(
+                                providers -> providers.replaceAll(provider -> new ResourceServerIntrospection(
+                                        provider, properties)))))
                 // /error stays open so server faults surface as 500s, not as a misleading 401
-                .authorizeHttpRequests(a -> a.requestMatchers("/error").permitAll().anyRequest().authenticated())
+                // Agents poll approval status by its unguessable id, without client authentication
+                .authorizeHttpRequests(a -> a
+                        .requestMatchers("/error").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/approvals/*").permitAll()
+                        .anyRequest().authenticated())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS));
         return http.build();
     }

@@ -38,9 +38,13 @@ class AccessTokenCustomizer implements OAuth2TokenCustomizer<JwtEncodingContext>
     @Override
     public void customize(JwtEncodingContext context) {
         context.getJwsHeader().algorithm(SignatureAlgorithm.ES256);
-        if (!OAuth2TokenType.ACCESS_TOKEN.equals(context.getTokenType())
-                || !AuthorizationGrantType.TOKEN_EXCHANGE.equals(context.getAuthorizationGrantType())) {
+        if (!OAuth2TokenType.ACCESS_TOKEN.equals(context.getTokenType())) {
             return;
+        }
+        if (!AuthorizationGrantType.TOKEN_EXCHANGE.equals(context.getAuthorizationGrantType())) {
+            // Resource servers are registered with client_credentials only because Spring
+            // requires a grant type; the broker issues tokens through token exchange alone
+            throw error("unauthorized_client", "The broker only issues tokens through token exchange");
         }
 
         OAuth2Authorization subject = context.getAuthorization();
@@ -54,6 +58,7 @@ class AccessTokenCustomizer implements OAuth2TokenCustomizer<JwtEncodingContext>
         List<String> agentAudiences =
                 context.getRegisteredClient().getClientSettings().getSetting(AgentClientRepository.ALLOWED_AUDIENCES);
         Object details = request.getAdditionalParameters().get("authorization_details");
+        Object approvalId = request.getAdditionalParameters().get("approval_id");
 
         Grant grant;
         try {
@@ -63,11 +68,14 @@ class AccessTokenCustomizer implements OAuth2TokenCustomizer<JwtEncodingContext>
                             request.getScopes(),
                             request.getResources(),
                             request.getAudiences(),
-                            details == null ? null : details.toString()),
+                            details == null ? null : details.toString(),
+                            approvalId == null ? null : approvalId.toString()),
                     delegation,
                     agentAudiences,
                     clock.instant(),
                     context.getClaims().build().getExpiresAt());
+        } catch (ExchangeRules.ApprovalPending pending) {
+            throw new ApprovalPendingException(pending.approval(), pending.getMessage());
         } catch (ExchangeRules.Denied denied) {
             throw error(denied.code(), denied.getMessage());
         }

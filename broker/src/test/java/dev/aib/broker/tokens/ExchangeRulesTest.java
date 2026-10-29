@@ -2,13 +2,23 @@ package dev.aib.broker.tokens;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import dev.aib.broker.approvals.Approval;
+import dev.aib.broker.approvals.Approval.Status;
+import dev.aib.broker.approvals.ApprovalService;
 import dev.aib.broker.config.BrokerProperties;
 import dev.aib.broker.delegations.Delegation;
 import dev.aib.broker.delegations.Delegation.TaskScope;
 import dev.aib.broker.policy.ActionRequest;
 import dev.aib.broker.policy.ActionRequest.Action;
 import dev.aib.broker.policy.PolicyEngine;
+import dev.aib.broker.tokens.ExchangeRules.ApprovalPending;
 import dev.aib.broker.tokens.ExchangeRules.Denied;
 import dev.aib.broker.tokens.ExchangeRules.Grant;
 import dev.aib.broker.tokens.ExchangeRules.Request;
@@ -17,6 +27,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
@@ -30,6 +41,8 @@ class ExchangeRulesTest {
 
     static final String READ_1042 = "[{\"type\":\"read\",\"order_id\":\"1042\"}]";
 
+    final ApprovalService approvals = mock(ApprovalService.class);
+
     final ExchangeRules rules = new ExchangeRules(new BrokerProperties(
             "http://broker.test",
             "x".repeat(32),
@@ -40,7 +53,8 @@ class ExchangeRulesTest {
                     new BrokerProperties.Resource(ORDERS,
                             Set.of("orders:read", "orders:refund", "orders:cancel", "orders:delete")),
                     new BrokerProperties.Resource(BILLING, Set.of("billing:read")))),
-            POLICY);
+            POLICY,
+            approvals);
 
     final Delegation delegation = delegation(Set.of("orders:read", "orders:refund", "orders:delete"),
             NOW.plus(Duration.ofHours(1)), null);
@@ -53,7 +67,7 @@ class ExchangeRulesTest {
 
     static Request request(String scope, String details) {
         return new Request("agt_1", scope.isEmpty() ? Set.of() : Set.of(scope.split(" ")), Set.of(ORDERS), Set.of(),
-                details);
+                details, null);
     }
 
     Grant evaluate(Request request) {
@@ -106,17 +120,91 @@ class ExchangeRulesTest {
     }
 
     @Test
-    void refundsAboveFiftyDollarsNeedApproval() {
-        assertDenied(() -> evaluate(request("orders:refund",
-                        "[{\"type\":\"refund\",\"order_id\":\"1042\",\"max_amount_cents\":12000}]")),
-                "access_denied", "Needs human approval");
+    void refundsAboveFiftyDollarsOpenAnApprovalRequest() {
+        Approval pending = approval(Status.PENDING);
+        when(approvals.requestOrReuse(eq("agt_1"), eq(delegation), eq(ORDERS), any(), any())).thenReturn(pending);
+
+        assertThatThrownBy(() -> evaluate(request("orders:refund", REFUND_1042_120)))
+                .isInstanceOfSatisfying(ApprovalPending.class, e -> {
+                    assertThat(e.code()).isEqualTo("authorization_pending");
+                    assertThat(e.approval()).isEqualTo(pending);
+                });
+    }
+
+    // ---- Redeeming an approval ----
+
+    @Test
+    void anApprovedRequestIsIssuedOnceAndConsumesTheApproval() {
+        Approval approved = approval(Status.APPROVED);
+        when(approvals.find("apr_1")).thenReturn(Optional.of(approved));
+        when(approvals.consume("apr_1")).thenReturn(true);
+
+        Grant grant = evaluate(withApproval(REFUND_1042_120, "apr_1"));
+
+        assertThat(grant.action().amountCents()).isEqualTo(12000);
+        assertThat(grant.policyReason()).contains("Permitted with human approval by refund-task-orders").contains("apr_1");
+        verify(approvals).consume("apr_1");
+    }
+
+    @Test
+    void anApprovalOnlyCoversTheExactRequestItWasGrantedFor() {
+        when(approvals.find("apr_1")).thenReturn(Optional.of(approval(Status.APPROVED)));
+
+        // Approved for $120 on 1042; the agent now asks for $130
+        String different = "[{\"type\":\"refund\",\"order_id\":\"1042\",\"max_amount_cents\":13000}]";
+        assertDenied(() -> evaluate(withApproval(different, "apr_1")), "invalid_grant", "different request");
+        verify(approvals, never()).consume(any());
+    }
+
+    @Test
+    void pendingDeniedExpiredAndUsedApprovalsDoNotIssue() {
+        when(approvals.find("apr_1")).thenReturn(Optional.of(approval(Status.PENDING)));
+        assertThatThrownBy(() -> evaluate(withApproval(REFUND_1042_120, "apr_1"))).isInstanceOf(ApprovalPending.class);
+
+        when(approvals.find("apr_1")).thenReturn(Optional.of(approval(Status.DENIED)));
+        assertDenied(() -> evaluate(withApproval(REFUND_1042_120, "apr_1")), "access_denied", "denied");
+
+        Approval stale = approval(Status.PENDING, NOW.minusSeconds(1));
+        when(approvals.find("apr_1")).thenReturn(Optional.of(stale));
+        assertDenied(() -> evaluate(withApproval(REFUND_1042_120, "apr_1")), "access_denied", "expired");
+
+        when(approvals.find("apr_1")).thenReturn(Optional.of(approval(Status.USED)));
+        assertDenied(() -> evaluate(withApproval(REFUND_1042_120, "apr_1")), "invalid_grant", "already been used");
+
+        when(approvals.find("apr_1")).thenReturn(Optional.of(approval(Status.APPROVED)));
+        when(approvals.consume("apr_1")).thenReturn(false); // lost a race with a concurrent retry
+        assertDenied(() -> evaluate(withApproval(REFUND_1042_120, "apr_1")), "invalid_grant", "already been used");
+    }
+
+    @Test
+    void unknownApprovalIdsAreRejected() {
+        when(approvals.find("apr_missing")).thenReturn(Optional.empty());
+        assertDenied(() -> evaluate(withApproval(REFUND_1042_120, "apr_missing")), "invalid_grant", "Unknown approval_id");
+    }
+
+    static final String REFUND_1042_120 = "[{\"type\":\"refund\",\"order_id\":\"1042\",\"max_amount_cents\":12000}]";
+
+    static Request withApproval(String details, String approvalId) {
+        return new Request("agt_1", Set.of("orders:refund"), Set.of(ORDERS), Set.of(), details, approvalId);
+    }
+
+    Approval approval(Status status) {
+        return approval(status, NOW.plus(Duration.ofMinutes(5)));
+    }
+
+    Approval approval(Status status, Instant expiresAt) {
+        ActionRequest action = new ActionRequest(Action.REFUND, "1042", null, 12000);
+        return new Approval("apr_1", delegation.id(), "agt_1", "alice",
+                ApprovalService.requestHash("agt_1", delegation.id(), ORDERS, action), ORDERS,
+                action.toAuthorizationDetail(), "Needs human approval", status, NOW.minusSeconds(60), expiresAt,
+                null, "alice", null);
     }
 
     // ---- Binding to the delegation ----
 
     @Test
     void rejectsADelegationIssuedToAnotherAgent() {
-        Request other = new Request("agt_2", Set.of("orders:read"), Set.of(ORDERS), Set.of(), READ_1042);
+        Request other = new Request("agt_2", Set.of("orders:read"), Set.of(ORDERS), Set.of(), READ_1042, null);
         assertDenied(() -> evaluate(other), "invalid_grant", "different agent");
     }
 
@@ -143,14 +231,14 @@ class ExchangeRulesTest {
     void requiresExactlyOneResourceTheAgentIsRegisteredFor() {
         for (Set<String> resources : List.of(Set.<String>of(), Set.of(ORDERS, BILLING), Set.of(BILLING),
                 Set.of("https://unknown.example"))) {
-            Request req = new Request("agt_1", Set.of("orders:read"), resources, Set.of(), READ_1042);
+            Request req = new Request("agt_1", Set.of("orders:read"), resources, Set.of(), READ_1042, null);
             assertDenied(() -> evaluate(req), "invalid_target", "");
         }
     }
 
     @Test
     void rejectsTheAudienceParameter() {
-        Request req = new Request("agt_1", Set.of("orders:read"), Set.of(ORDERS), Set.of(ORDERS), READ_1042);
+        Request req = new Request("agt_1", Set.of("orders:read"), Set.of(ORDERS), Set.of(ORDERS), READ_1042, null);
         assertDenied(() -> evaluate(req), "invalid_target", "resource parameter");
     }
 
