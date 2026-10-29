@@ -2,6 +2,9 @@ package dev.aib.broker.tokens;
 
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import dev.aib.broker.audit.AuditLog;
+import dev.aib.broker.audit.AuditLog.EventType;
+import dev.aib.broker.audit.AuditLog.NewEvent;
 import dev.aib.broker.delegations.Delegation;
 import dev.aib.broker.delegations.DelegationRepository;
 import dev.aib.broker.support.Ids;
@@ -24,6 +27,7 @@ import org.springframework.security.oauth2.server.authorization.client.Registere
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
 import org.springframework.security.oauth2.server.authorization.settings.OAuth2TokenFormat;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Backs Spring Authorization Server with the broker's own tables instead of its generic
@@ -41,16 +45,22 @@ public class BrokerAuthorizationService implements OAuth2AuthorizationService {
     private final DelegationRepository delegations;
     private final IssuedTokenRepository issuedTokens;
     private final RegisteredClientRepository clients;
+    private final AuditLog audit;
+    private final TransactionTemplate transactions;
     private final Clock clock;
 
     BrokerAuthorizationService(
             DelegationRepository delegations,
             IssuedTokenRepository issuedTokens,
             RegisteredClientRepository clients,
+            AuditLog audit,
+            TransactionTemplate transactions,
             Clock clock) {
         this.delegations = delegations;
         this.issuedTokens = issuedTokens;
         this.clients = clients;
+        this.audit = audit;
+        this.transactions = transactions;
         this.clock = clock;
     }
 
@@ -69,19 +79,36 @@ public class BrokerAuthorizationService implements OAuth2AuthorizationService {
         }
         String value = token.getToken().getTokenValue();
         JWTClaimsSet claims = parseClaims(value);
-        issuedTokens.upsert(
-                new IssuedToken(
-                        claims.getJWTID(),
-                        (String) claims.getClaim("delegation_id"),
-                        authorization.getRegisteredClientId(),
-                        authorization.getPrincipalName(),
-                        claims.getAudience().getFirst(),
-                        authorization.getAuthorizedScopes(),
-                        claims.toString(),
-                        token.getToken().getIssuedAt(),
-                        token.getToken().getExpiresAt(),
-                        token.isInvalidated() ? clock.instant() : null),
-                Ids.sha256(value));
+        IssuedToken issued = new IssuedToken(
+                claims.getJWTID(),
+                (String) claims.getClaim("delegation_id"),
+                authorization.getRegisteredClientId(),
+                authorization.getPrincipalName(),
+                claims.getAudience().getFirst(),
+                authorization.getAuthorizedScopes(),
+                claims.toString(),
+                token.getToken().getIssuedAt(),
+                token.getToken().getExpiresAt(),
+                token.isInvalidated() ? clock.instant() : null);
+
+        // The token is only returned to the agent if it was recorded and audited
+        transactions.executeWithoutResult(status -> {
+            issuedTokens.upsert(issued, Ids.sha256(value));
+            if (!token.isInvalidated()) {
+                audit.append(new NewEvent(EventType.TOKEN_ISSUED, issued.agentId(), issued.userId(),
+                        issued.delegationId(), issued.jti(), issuedRequest(claims), "permit",
+                        GrantHolder.get().map(ExchangeRules.Grant::policyReason).orElse(null)));
+            }
+        });
+    }
+
+    private static Map<String, Object> issuedRequest(JWTClaimsSet claims) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("resource", claims.getAudience().getFirst());
+        request.put("scope", claims.getClaim("scope"));
+        request.put("authorization_details", claims.getClaim("authorization_details"));
+        request.put("expires_at", claims.getExpirationTime().toInstant().toString());
+        return request;
     }
 
     @Override

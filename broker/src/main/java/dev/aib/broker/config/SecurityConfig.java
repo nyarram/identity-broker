@@ -5,6 +5,7 @@ import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 import dev.aib.broker.agents.AgentAssertionDecoderFactory;
+import dev.aib.broker.tokens.DenialAuditor;
 import java.time.Clock;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -45,14 +46,19 @@ class SecurityConfig {
     /** OAuth endpoints: token, JWKS, introspection, revocation and metadata. */
     @Bean
     @Order(2)
-    SecurityFilterChain authorizationServerChain(HttpSecurity http, AgentAssertionDecoderFactory assertionDecoders)
+    SecurityFilterChain authorizationServerChain(
+            HttpSecurity http, AgentAssertionDecoderFactory assertionDecoders, DenialAuditor denialAuditor)
             throws Exception {
-        http.oauth2AuthorizationServer(as -> as.clientAuthentication(clientAuth -> clientAuth.authenticationProviders(
-                        providers -> providers.forEach(provider -> {
-                            if (provider instanceof JwtClientAssertionAuthenticationProvider jwtProvider) {
-                                jwtProvider.setJwtDecoderFactory(assertionDecoders);
-                            }
-                        }))))
+        http.oauth2AuthorizationServer(as -> as
+                        .clientAuthentication(clientAuth -> clientAuth
+                                .authenticationProviders(providers -> providers.forEach(provider -> {
+                                    if (provider instanceof JwtClientAssertionAuthenticationProvider jwtProvider) {
+                                        jwtProvider.setJwtDecoderFactory(assertionDecoders);
+                                    }
+                                }))
+                                .authenticationSuccessHandler(DenialAuditor.rememberAuthenticatedAgent())
+                                .errorResponseHandler(denialAuditor))
+                        .tokenEndpoint(token -> token.errorResponseHandler(denialAuditor)))
                 // /error stays open so server faults surface as 500s, not as a misleading 401
                 .authorizeHttpRequests(a -> a.requestMatchers("/error").permitAll().anyRequest().authenticated())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS));

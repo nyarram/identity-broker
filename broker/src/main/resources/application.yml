@@ -4,10 +4,18 @@ server:
 spring:
   application:
     name: broker
+  # The broker runs as a restricted role (insert-only on the audit log). Flyway runs as
+  # the schema owner and creates that role; see db/migration/afterMigrate.sql.
   datasource:
     url: ${BROKER_DB_URL:jdbc:postgresql://localhost:5432/broker}
-    username: ${BROKER_DB_USER:broker}
-    password: ${BROKER_DB_PASSWORD:broker}
+    username: ${BROKER_DB_APP_USER:broker_app}
+    password: ${BROKER_DB_APP_PASSWORD:broker_app_dev}
+  flyway:
+    user: ${BROKER_DB_OWNER_USER:broker}
+    password: ${BROKER_DB_OWNER_PASSWORD:broker}
+    placeholders:
+      app_role: ${spring.datasource.username}
+      app_password: ${spring.datasource.password}
 
 broker:
   issuer: ${BROKER_ISSUER:http://localhost:9000}
@@ -15,6 +23,8 @@ broker:
   # Where the ES256 signing key is kept. If unset, a key is generated in memory on every start.
   signing-key-file: ${BROKER_SIGNING_KEY_FILE:}
   access-token-ttl: 5m
+  # Cedar schema and policies. The default works when run from the broker/ directory.
+  policy-dir: ${BROKER_POLICY_DIR:../policies}
   # Resource servers the broker issues tokens for, and the scopes each one understands
   resources:
     - id: ${ORDERS_API_AUDIENCE:https://orders-api.example}

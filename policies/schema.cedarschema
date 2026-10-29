@@ -1,0 +1,28 @@
+// What an agent can ask to do. The broker validates every policy against this schema at
+// startup, and every request at evaluation time, so a typo fails loudly instead of
+// silently denying.
+
+entity Agent;
+entity Customer;
+entity Order;
+
+// Actions on a single order. Amounts are integer cents.
+action "read", "refund", "cancel", "delete" appliesTo {
+    principal: Agent,
+    resource: Order,
+    context: {
+        task_orders: Set<Order>,
+        amount_cents: Long,
+        human_approved: Bool,
+    },
+};
+
+// Listing a customer's orders
+action "list" appliesTo {
+    principal: Agent,
+    resource: Customer,
+    context: {
+        task_customer: Customer,
+        human_approved: Bool,
+    },
+};

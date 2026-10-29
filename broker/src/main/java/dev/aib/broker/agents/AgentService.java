@@ -6,6 +6,9 @@ import com.nimbusds.jose.jwk.Curve;
 import com.nimbusds.jose.jwk.ECKey;
 import com.nimbusds.jose.jwk.JWK;
 import com.nimbusds.jose.jwk.KeyUse;
+import dev.aib.broker.audit.AuditLog;
+import dev.aib.broker.audit.AuditLog.EventType;
+import dev.aib.broker.audit.AuditLog.NewEvent;
 import dev.aib.broker.config.BrokerProperties;
 import dev.aib.broker.support.ApiException;
 import dev.aib.broker.support.Ids;
@@ -14,20 +17,24 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class AgentService {
 
     private final AgentRepository agents;
     private final BrokerProperties properties;
+    private final AuditLog audit;
     private final Clock clock;
 
-    AgentService(AgentRepository agents, BrokerProperties properties, Clock clock) {
+    AgentService(AgentRepository agents, BrokerProperties properties, AuditLog audit, Clock clock) {
         this.agents = agents;
         this.properties = properties;
+        this.audit = audit;
         this.clock = clock;
     }
 
+    @Transactional
     public Agent register(String name, Map<String, Object> publicJwk, List<String> allowedAudiences) {
         if (name == null || name.isBlank()) {
             throw ApiException.badRequest("name is required");
@@ -43,6 +50,9 @@ public class AgentService {
         Agent agent = new Agent(
                 Ids.newId("agt"), name, parsePublicKey(publicJwk), List.copyOf(allowedAudiences), clock.instant(), null);
         agents.insert(agent);
+        audit.append(new NewEvent(EventType.AGENT_REGISTERED, agent.id(), null, null, null,
+                Map.of("name", name, "key_id", agent.publicKey().getKeyID(), "allowed_audiences", agent.allowedAudiences()),
+                null, null));
         return agent;
     }
 
@@ -50,9 +60,12 @@ public class AgentService {
         return agents.findById(id).orElseThrow(() -> ApiException.notFound("No agent " + id));
     }
 
+    @Transactional
     public void disable(String id) {
         get(id);
-        agents.disable(id, clock.instant());
+        if (agents.disable(id, clock.instant())) {
+            audit.append(new NewEvent(EventType.AGENT_DISABLED, id, null, null, null, Map.of(), null, null));
+        }
     }
 
     /** Agents sign client assertions with ES256, so only public P-256 keys are accepted. */

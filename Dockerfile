@@ -17,5 +17,8 @@ ARG SERVICE
 RUN groupadd --system app && useradd --system --gid app app \
     && mkdir -p /var/lib/broker && chown app:app /var/lib/broker
 COPY --from=build "/src/${SERVICE}/build/libs/${SERVICE}.jar" /app/app.jar
+# Cedar policies, read by the broker at startup
+COPY policies /app/policies
+ENV BROKER_POLICY_DIR=/app/policies
 USER app
 ENTRYPOINT ["java", "-XX:MaxRAMPercentage=75", "-jar", "/app/app.jar"]

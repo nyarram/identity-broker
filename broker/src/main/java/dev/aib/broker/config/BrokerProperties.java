@@ -14,6 +14,7 @@ public record BrokerProperties(
         String adminToken,
         String signingKeyFile,
         Duration accessTokenTtl,
+        String policyDir,
         List<Resource> resources) {
 
     /** A resource server the broker issues tokens for (an RFC 8707 resource indicator). */
@@ -32,6 +33,9 @@ public record BrokerProperties(
         }
         if (accessTokenTtl == null || accessTokenTtl.compareTo(MAX_ACCESS_TOKEN_TTL) > 0) {
             throw new IllegalStateException("broker.access-token-ttl must be at most " + MAX_ACCESS_TOKEN_TTL);
+        }
+        if (policyDir == null || policyDir.isBlank()) {
+            throw new IllegalStateException("broker.policy-dir (BROKER_POLICY_DIR) must be set");
         }
         resources = resources == null ? List.of() : List.copyOf(resources);
     }

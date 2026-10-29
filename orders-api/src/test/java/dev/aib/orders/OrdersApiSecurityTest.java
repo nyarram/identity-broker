@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -74,7 +75,7 @@ class OrdersApiSecurityTest {
 
     @Test
     void writeResponsesRecordTheUserAndTheAgent() throws Exception {
-        String token = token(c -> c.claim("scope", "orders:cancel"));
+        String token = token(c -> c.claim("scope", "orders:cancel").claim("authorization_details", detail("cancel", "1044")));
 
         HttpResponse<String> response = call("POST", "/orders/1044/cancel", token, null);
 
@@ -169,14 +170,71 @@ class OrdersApiSecurityTest {
 
     @Test
     void refundScopeDoesNotAllowReads() throws Exception {
-        String refundOnly = token(c -> c.claim("scope", "orders:refund"));
+        String refundOnly = refundToken("1042", 3000);
 
         assertThat(call("GET", "/orders/1042", refundOnly, null).statusCode()).isEqualTo(403);
         assertThat(call("POST", "/orders/1042/refund", refundOnly, "{\"amount_cents\":3000}").statusCode())
                 .isEqualTo(200);
     }
 
+    // ---- 403: valid token and scope, but authorization_details do not cover the request ----
+
+    @Test
+    void readTokenForOneOrderCannotReadAnother() throws Exception {
+        HttpResponse<String> response = call("GET", "/orders/1043", token(c -> {}), null);
+
+        assertThat(response.statusCode()).isEqualTo(403);
+    }
+
+    @Test
+    void refundAboveTheTokensMaxAmountIs403() throws Exception {
+        String token = refundToken("1045", 3000);
+
+        assertThat(call("POST", "/orders/1045/refund", token, "{\"amount_cents\":3001}").statusCode()).isEqualTo(403);
+        assertThat(call("POST", "/orders/1045/refund", token, "{\"amount_cents\":3000}").statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    void refundForAnotherOrderIs403() throws Exception {
+        String token = refundToken("1046", 3000);
+
+        assertThat(call("POST", "/orders/1048/refund", token, "{\"amount_cents\":1000}").statusCode()).isEqualTo(403);
+    }
+
+    @Test
+    void refundScopeWithoutRefundDetailsIs403() throws Exception {
+        // Right scope, but the details describe a read
+        String token = token(c -> c.claim("scope", "orders:refund"));
+
+        assertThat(call("POST", "/orders/1042/refund", token, "{\"amount_cents\":100}").statusCode()).isEqualTo(403);
+    }
+
+    @Test
+    void listingIsLimitedToTheTokensCustomer() throws Exception {
+        String token = token(c -> c.claim("authorization_details",
+                List.of(Map.of("type", "list", "customer_id", "cust_alice"))));
+
+        assertThat(call("GET", "/orders?customer=cust_alice", token, null).statusCode()).isEqualTo(200);
+        assertThat(call("GET", "/orders?customer=cust_bob", token, null).statusCode()).isEqualTo(403);
+    }
+
+    @Test
+    void tokenWithoutAuthorizationDetailsIs403() throws Exception {
+        String token = token(c -> c.claim("authorization_details", null));
+
+        assertThat(call("GET", "/orders/1042", token, null).statusCode()).isEqualTo(403);
+    }
+
     // ---- Helpers ----
+
+    static List<Map<String, Object>> detail(String type, String orderId) {
+        return List.of(Map.of("type", type, "order_id", orderId));
+    }
+
+    static String refundToken(String orderId, long maxAmountCents) {
+        return token(c -> c.claim("scope", "orders:refund").claim("authorization_details",
+                List.of(Map.of("type", "refund", "order_id", orderId, "max_amount_cents", maxAmountCents))));
+    }
 
     static JWTClaimsSet.Builder validClaims() {
         Instant now = Instant.now();
@@ -191,7 +249,8 @@ class OrdersApiSecurityTest {
                 .claim("client_id", "agt_support")
                 .claim("act", Map.of("sub", "agt_support"))
                 .claim("scope", "orders:read")
-                .claim("delegation_id", "dlg_test");
+                .claim("delegation_id", "dlg_test")
+                .claim("authorization_details", List.of(Map.of("type", "read", "order_id", "1042")));
     }
 
     static String token(Consumer<JWTClaimsSet.Builder> customize) {

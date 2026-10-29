@@ -35,3 +35,35 @@ Decisions made while building, with the reason and the trade-off. Newest last.
 **One Dockerfile for both services**, selected with `--build-arg SERVICE=...`. Images run as a non-root user. The broker's signing key is kept in a named volume with owner-only permissions, so tokens survive restarts.
 
 **Gradle downloads a JDK 21 toolchain** (foojay resolver) when the machine has an older JDK, so `./gradlew test` works without installing Java 21.
+
+## M2
+
+**Every token is for exactly one action.** The exchange must carry one RFC 9396 `authorization_details` entry (`read`, `list`, `refund`, `cancel` or `delete`, with its order or customer), and `scope` must be exactly that action's scope. This is what lets policy and the Orders API reason about a specific order; a bare `orders:read` token could read anything. Unknown fields are rejected rather than ignored.
+
+**Policies are validated against a Cedar schema at startup, and every request at evaluation time.** Cedar skips policies that fail to evaluate, which silently denies; the original spec's `resource.id` policy did exactly that. With schema validation the broker refuses to start instead. Evaluation errors that still slip through are logged at error level and denied.
+
+**Every policy needs an `@id`.** The id is the reason recorded in the audit log, for example `Forbidden by never-delete`.
+
+**Two policies were added to the spec's illustrative set:** listing a customer's orders is limited to the task's customer, and cancelling a task order always needs human approval. Without a cancel rule the Orders API's cancel endpoint would be unusable.
+
+**Requests that need approval are denied with `access_denied` until M3,** which turns them into `authorization_pending` with an approval request. The two-pass evaluation (`human_approved` false, then true) is already in place and tested.
+
+**Policy denials use the `access_denied` error code.** RFC 6749 defines it for the authorization endpoint; it is the closest standard code for a refused token request, and keeps `invalid_scope` for malformed scope requests.
+
+**The Orders API checks `authorization_details` on every request, not only refunds.** A token for reading order 1042 cannot read 1043, even with `orders:read`. The grant is checked before the order is looked up, so a token cannot reveal whether other orders exist.
+
+**Audit hashing uses RFC 8785 canonical JSON, implemented in-house for a restricted value set.** Audit events contain only strings, whole numbers, booleans, null, objects and arrays; floating point, the hard part of JCS, is rejected. About 80 lines with tests, against a dependency for a corner of it. Raw request parameters such as `authorization_details` are stored as strings, so a malformed request can always be audited.
+
+**Appends are serialized with a Postgres advisory lock,** and `seq` is assigned under it, so the chain never forks and has no gaps (a gap means a deleted event). A concurrency test appends from 8 threads and verifies the chain.
+
+**The broker runs as a restricted database role.** Flyway migrates as the schema owner; `afterMigrate.sql` creates the `broker_app` role on every start and grants it SELECT and INSERT only on `audit_events`. It refuses to run if the app role is the owner. The role's password is passed as a Flyway placeholder, so it must not contain a single quote.
+
+**Issuance is audited fail-closed, denials fail-open.** The token is recorded and audited in one transaction before it is returned; if the audit write fails, no token is issued. A denial is still refused if its audit write fails, because refusing is the safe direction; the failure is logged.
+
+**Failed client authentication is audited without trusting the claimed agent.** `agent_id` is set only after the agent has proved its identity; the claimed `client_id` is kept in the request summary.
+
+**Spring clears the security context before token-endpoint errors reach the handler,** so the authenticated agent is remembered as a request attribute by a replacement client-authentication success handler. The policy decision is carried from the token customizer to where the token is saved in the same way (`GrantHolder`).
+
+**`invalid_client` responses carry only the error code, with 401,** as Spring does by default, so a caller cannot probe which agents exist. The audit log keeps the full reason.
+
+**Policy hot-reload is not implemented.** The spec asks for reload on file change in dev; restarting the broker takes a few seconds, and a reload path is one more thing that can load an unvalidated policy.

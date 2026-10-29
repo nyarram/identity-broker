@@ -70,7 +70,8 @@ async function registerAgent(name) {
   return { res, id: res.data.id, privateKey: key.privateKey };
 }
 
-async function exchange(agent, subjectToken, scope) {
+// Each token is for one action, described by one RFC 9396 authorization_details entry
+async function exchange(agent, subjectToken, scope, detail) {
   return request("POST", `${BROKER}/oauth2/token`, {
     form: {
       grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
@@ -81,6 +82,7 @@ async function exchange(agent, subjectToken, scope) {
       subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
       resource: ORDERS_AUDIENCE,
       scope,
+      authorization_details: JSON.stringify([detail]),
     },
   });
 }
@@ -89,22 +91,22 @@ async function exchange(agent, subjectToken, scope) {
 const agent = await registerAgent("smoke-support-bot");
 check("register agent with a public key", agent.res.status === 201, JSON.stringify(agent.res.data));
 
-// 2. A human delegates a read-only task
+// 2. A human delegates a task: help Alice with order 1042
 const delegation = await request("POST", `${BROKER}/delegations`, {
   bearer: ADMIN_TOKEN,
   json: {
     user_id: "alice",
     agent_id: agent.id,
-    task_description: "Answer Alice's question about order 1042",
+    task_description: "Help Alice with her running shoes order (1042)",
     task_scope: { customer_id: "cust_alice", order_ids: ["1042"] },
-    scopes: ["orders:read"],
+    scopes: ["orders:read", "orders:refund", "orders:delete"],
   },
 });
 check("create delegation", delegation.status === 201, JSON.stringify(delegation.data));
 const delegationToken = delegation.data.delegation_token;
 
-// 3. The agent exchanges it (private_key_jwt + RFC 8693)
-const exchanged = await exchange(agent, delegationToken, "orders:read");
+// 3. The agent exchanges it for a token to read order 1042 (private_key_jwt + RFC 8693)
+const exchanged = await exchange(agent, delegationToken, "orders:read", { type: "read", order_id: "1042" });
 check("token exchange with private_key_jwt", exchanged.status === 200, JSON.stringify(exchanged.data));
 const accessToken = exchanged.data.access_token;
 
@@ -120,18 +122,55 @@ check("exp - iat <= 300", claims.exp - claims.iat <= 300, `${claims.exp - claims
 // 4. The Orders API enforces it
 const read = await request("GET", `${ORDERS}/orders/1042`, { bearer: accessToken });
 check("Orders API: access token reads the order (200)", read.status === 200, `got ${read.status}`);
+const readOther = await request("GET", `${ORDERS}/orders/1043`, { bearer: accessToken });
+check("Orders API: the same token cannot read another order (403)", readOther.status === 403, `got ${readOther.status}`);
 const withDelegation = await request("GET", `${ORDERS}/orders/1042`, { bearer: delegationToken });
 check("Orders API: delegation token is rejected (401)", withDelegation.status === 401, `got ${withDelegation.status}`);
 const noToken = await request("GET", `${ORDERS}/orders/1042`);
 check("Orders API: no token is rejected (401)", noToken.status === 401, `got ${noToken.status}`);
-const refund = await request("POST", `${ORDERS}/orders/1042/refund`, { bearer: accessToken, json: { amount_cents: 3000 } });
-check("Orders API: read-only token cannot refund (403)", refund.status === 403, `got ${refund.status}`);
+const refundWithRead = await request("POST", `${ORDERS}/orders/1042/refund`, { bearer: accessToken, json: { amount_cents: 3000 } });
+check("Orders API: read-only token cannot refund (403)", refundWithRead.status === 403, `got ${refundWithRead.status}`);
 
-// 5. Another agent cannot use this delegation
+// 5. Policy (Cedar) decides what the broker will issue
+const outOfTask = await exchange(agent, delegationToken, "orders:read", { type: "read", order_id: "1047" });
+check("policy: reading an order outside the task is denied", outOfTask.data.error === "access_denied",
+  `${outOfTask.status} ${JSON.stringify(outOfTask.data)}`);
+const del = await exchange(agent, delegationToken, "orders:delete", { type: "delete", order_id: "1042" });
+check("policy: delete is denied even though the delegation lists it", del.data.error === "access_denied",
+  `${del.status} ${JSON.stringify(del.data)}`);
+const bigRefund = await exchange(agent, delegationToken, "orders:refund", { type: "refund", order_id: "1042", max_amount_cents: 12000 });
+check("policy: a $120 refund is not issued without approval", bigRefund.data.error === "access_denied",
+  `${bigRefund.status} ${JSON.stringify(bigRefund.data)}`);
+
+const refundGrant = await exchange(agent, delegationToken, "orders:refund", { type: "refund", order_id: "1042", max_amount_cents: 3000 });
+check("policy: a $30 refund on the task order is issued", refundGrant.status === 200, JSON.stringify(refundGrant.data));
+const refundToken = refundGrant.data.access_token;
+const overMax = await request("POST", `${ORDERS}/orders/1042/refund`, { bearer: refundToken, json: { amount_cents: 3001 } });
+check("Orders API: refund above the token's max_amount_cents is rejected (403)", overMax.status === 403, `got ${overMax.status}`);
+const refunded = await request("POST", `${ORDERS}/orders/1042/refund`, { bearer: refundToken, json: { amount_cents: 3000 } });
+check("Orders API: $30 refund succeeds and names user and agent",
+  refunded.status === 200 && refunded.data.performed_by?.user === "alice" && refunded.data.performed_by?.agent === agent.id,
+  `${refunded.status} ${JSON.stringify(refunded.data)}`);
+
+// 6. Another agent cannot use this delegation
 const rogue = await registerAgent("smoke-rogue-bot");
-const stolen = await exchange(rogue, delegationToken, "orders:read");
+const stolen = await exchange(rogue, delegationToken, "orders:read", { type: "read", order_id: "1042" });
 check("another agent cannot use the delegation", stolen.status === 400 && stolen.data.error === "invalid_grant",
   `${stolen.status} ${JSON.stringify(stolen.data)}`);
+
+// 7. Everything above is in the tamper-evident audit log
+const events = [];
+for (let after = 0; after !== null; ) {
+  const page = await request("GET", `${BROKER}/admin/audit?limit=500&after=${after}`, { bearer: ADMIN_TOKEN });
+  events.push(...(page.data.events ?? []));
+  after = page.data.next_after ?? null;
+}
+const ours = events.filter((e) => e.delegation_id === delegation.data.delegation_id);
+const issued = ours.filter((e) => e.event_type === "token_issued").length;
+const denied = ours.filter((e) => e.event_type === "token_denied").length;
+check("audit: issued and denied tokens are recorded", issued === 2 && denied === 4, `issued=${issued} denied=${denied}`);
+const verify = await request("GET", `${BROKER}/admin/audit/verify`, { bearer: ADMIN_TOKEN });
+check("audit: hash chain verifies", verify.data.valid === true, JSON.stringify(verify.data));
 
 console.log(failures === 0 ? "\nAll smoke checks passed." : `\n${failures} smoke check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

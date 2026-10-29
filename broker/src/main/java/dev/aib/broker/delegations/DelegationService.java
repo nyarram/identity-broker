@@ -2,6 +2,9 @@ package dev.aib.broker.delegations;
 
 import dev.aib.broker.agents.Agent;
 import dev.aib.broker.agents.AgentService;
+import dev.aib.broker.audit.AuditLog;
+import dev.aib.broker.audit.AuditLog.EventType;
+import dev.aib.broker.audit.AuditLog.NewEvent;
 import dev.aib.broker.config.BrokerProperties;
 import dev.aib.broker.delegations.Delegation.TaskScope;
 import dev.aib.broker.support.ApiException;
@@ -9,7 +12,9 @@ import dev.aib.broker.support.Ids;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
@@ -20,6 +25,7 @@ import org.springframework.security.oauth2.jwt.JwtClaimsSet;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
 import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class DelegationService {
@@ -37,6 +43,7 @@ public class DelegationService {
     private final AgentService agents;
     private final BrokerProperties properties;
     private final JwtEncoder jwtEncoder;
+    private final AuditLog audit;
     private final Clock clock;
 
     DelegationService(
@@ -44,14 +51,17 @@ public class DelegationService {
             AgentService agents,
             BrokerProperties properties,
             JwtEncoder jwtEncoder,
+            AuditLog audit,
             Clock clock) {
         this.delegations = delegations;
         this.agents = agents;
         this.properties = properties;
         this.jwtEncoder = jwtEncoder;
+        this.audit = audit;
         this.clock = clock;
     }
 
+    @Transactional
     public CreatedDelegation create(
             String userId, String agentId, String taskDescription, TaskScope taskScope, List<String> scopes,
             Long expiresInSeconds) {
@@ -61,7 +71,10 @@ public class DelegationService {
         if (taskDescription == null || taskDescription.isBlank()) {
             throw ApiException.badRequest("task_description is required");
         }
-        if (taskScope == null || taskScope.orderIds() == null || taskScope.orderIds().isEmpty()) {
+        if (taskScope == null || taskScope.customerId() == null || taskScope.customerId().isBlank()) {
+            throw ApiException.badRequest("task_scope.customer_id is required");
+        }
+        if (taskScope.orderIds() == null || taskScope.orderIds().isEmpty()) {
             throw ApiException.badRequest("task_scope.order_ids must list at least one order");
         }
         Agent agent = agents.get(agentId);
@@ -78,7 +91,19 @@ public class DelegationService {
                 grantedScopes, now, now.plus(lifetime), null);
         String token = encode(delegation);
         delegations.insert(delegation, Ids.sha256(token));
+        audit.append(new NewEvent(EventType.DELEGATION_CREATED, delegation.agentId(), delegation.userId(),
+                delegation.id(), null, summary(delegation), null, null));
         return new CreatedDelegation(delegation, token);
+    }
+
+    private static Map<String, Object> summary(Delegation d) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("task_description", d.taskDescription());
+        summary.put("customer_id", d.taskScope().customerId());
+        summary.put("order_ids", d.taskScope().orderIds());
+        summary.put("scopes", List.copyOf(d.scopes()));
+        summary.put("expires_at", d.expiresAt().toString());
+        return summary;
     }
 
     private Set<String> validScopes(Agent agent, List<String> scopes) {

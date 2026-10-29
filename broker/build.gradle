@@ -15,6 +15,10 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-webmvc'
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-flyway'
+    // The uber jar bundles Cedar's native library for Linux, macOS and Windows; it does not
+    // put Guava on the compile classpath, so it is declared explicitly
+    implementation 'com.cedarpolicy:cedar-java:4.10.0:uber'
+    implementation 'com.google.guava:guava:33.5.0-jre'
     runtimeOnly 'org.flywaydb:flyway-database-postgresql'
     runtimeOnly 'org.postgresql:postgresql'
 

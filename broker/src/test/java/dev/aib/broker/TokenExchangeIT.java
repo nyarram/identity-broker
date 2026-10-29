@@ -25,10 +25,7 @@ class TokenExchangeIT extends IntegrationTestBase {
     void exchangesADelegationForANarrowShortLivedAccessToken() throws Exception {
         TestAgent agent = registerAgent("support-bot");
         Response delegation = createDelegation(agent, List.of("orders:read", "orders:refund"), null);
-        Map<String, String> form = exchangeForm(agent, delegation.string("delegation_token"), "orders:refund");
-        form.put("authorization_details", "[{\"type\":\"refund\",\"order_id\":\"1042\",\"max_amount_cents\":3000}]");
-
-        Response response = postForm("/oauth2/token", form);
+        Response response = exchange(agent, delegation.string("delegation_token"), "orders:refund", refund("1042", 3000));
 
         assertThat(response.status()).as(response.toString()).isEqualTo(200);
         assertThat(response.string("token_type")).isEqualTo("Bearer");
@@ -55,7 +52,7 @@ class TokenExchangeIT extends IntegrationTestBase {
     @Test
     void accessTokenVerifiesAgainstThePublishedJwks() throws Exception {
         TestAgent agent = registerAgent("support-bot");
-        String accessToken = exchange(agent, delegationToken(agent, "orders:read"), "orders:read").string("access_token");
+        String accessToken = exchangeRead(agent, delegationToken(agent, "orders:read")).string("access_token");
 
         JWKSet jwks = JWKSet.parse(get("/oauth2/jwks").json());
         SignedJWT token = SignedJWT.parse(accessToken);
@@ -69,7 +66,7 @@ class TokenExchangeIT extends IntegrationTestBase {
     @Test
     void recordsEveryIssuedToken() throws Exception {
         TestAgent agent = registerAgent("support-bot");
-        String accessToken = exchange(agent, delegationToken(agent, "orders:read"), "orders:read").string("access_token");
+        String accessToken = exchangeRead(agent, delegationToken(agent, "orders:read")).string("access_token");
         String jti = SignedJWT.parse(accessToken).getJWTClaimsSet().getJWTID();
 
         Map<String, Object> row = jdbc.sql("select agent_id, user_id, audience from issued_tokens where jti = :jti")
@@ -85,7 +82,7 @@ class TokenExchangeIT extends IntegrationTestBase {
         TestAgent agent = registerAgent("support-bot");
         Response delegation = createDelegation(agent, List.of("orders:read"), 60L);
 
-        String accessToken = exchange(agent, delegation.string("delegation_token"), "orders:read").string("access_token");
+        String accessToken = exchangeRead(agent, delegation.string("delegation_token")).string("access_token");
 
         JWTClaimsSet claims = SignedJWT.parse(accessToken).getJWTClaimsSet();
         assertThat(claims.getExpirationTime().toInstant()).isBeforeOrEqualTo(
@@ -97,7 +94,7 @@ class TokenExchangeIT extends IntegrationTestBase {
     @Test
     void rejectsAnAssertionSignedWithAnotherKey() {
         TestAgent agent = registerAgent("support-bot");
-        Map<String, String> form = exchangeForm(agent, delegationToken(agent, "orders:read"), "orders:read");
+        Map<String, String> form = exchangeForm(agent, delegationToken(agent, "orders:read"), "orders:read", read("1042"));
         form.put("client_assertion", clientAssertion(agent.id(), newKey(), ISSUER + "/oauth2/token", Duration.ofMinutes(1)));
 
         assertError(postForm("/oauth2/token", form), 401, "invalid_client");
@@ -108,9 +105,9 @@ class TokenExchangeIT extends IntegrationTestBase {
         TestAgent agent = registerAgent("support-bot");
         String delegationToken = delegationToken(agent, "orders:read");
 
-        Map<String, String> wrongAudience = exchangeForm(agent, delegationToken, "orders:read");
+        Map<String, String> wrongAudience = exchangeForm(agent, delegationToken, "orders:read", read("1042"));
         wrongAudience.put("client_assertion", clientAssertion(agent.id(), agent.key(), "https://elsewhere.example", Duration.ofMinutes(1)));
-        Map<String, String> longLived = exchangeForm(agent, delegationToken, "orders:read");
+        Map<String, String> longLived = exchangeForm(agent, delegationToken, "orders:read", read("1042"));
         longLived.put("client_assertion", clientAssertion(agent.id(), agent.key(), ISSUER + "/oauth2/token", Duration.ofHours(1)));
 
         assertError(postForm("/oauth2/token", wrongAudience), 401, "invalid_client");
@@ -124,7 +121,7 @@ class TokenExchangeIT extends IntegrationTestBase {
 
         postJson("/admin/agents/" + agent.id() + "/disable", Map.of(), ADMIN_TOKEN);
 
-        assertError(exchange(agent, delegationToken, "orders:read"), 401, "invalid_client");
+        assertError(exchangeRead(agent, delegationToken), 401, "invalid_client");
     }
 
     // ---- Binding the token to the delegation ----
@@ -134,7 +131,7 @@ class TokenExchangeIT extends IntegrationTestBase {
         TestAgent owner = registerAgent("support-bot");
         TestAgent rogue = registerAgent("rogue-bot");
 
-        assertError(exchange(rogue, delegationToken(owner, "orders:read"), "orders:read"), 400, "invalid_grant");
+        assertError(exchangeRead(rogue, delegationToken(owner, "orders:read")), 400, "invalid_grant");
     }
 
     @Test
@@ -142,9 +139,9 @@ class TokenExchangeIT extends IntegrationTestBase {
         TestAgent agent = registerAgent("support-bot");
         String delegationToken = delegationToken(agent, "orders:read");
 
-        assertError(exchange(agent, delegationToken, "orders:refund"), 400, "invalid_scope");
-        assertError(exchange(agent, delegationToken, "orders:read orders:refund"), 400, "invalid_scope");
-        Map<String, String> noScope = exchangeForm(agent, delegationToken, "");
+        assertError(exchange(agent, delegationToken, "orders:refund", refund("1042", 3000)), 400, "invalid_scope");
+        assertError(exchange(agent, delegationToken, "orders:read orders:refund", read("1042")), 400, "invalid_scope");
+        Map<String, String> noScope = exchangeForm(agent, delegationToken, "", read("1042"));
         noScope.remove("scope");
         assertError(postForm("/oauth2/token", noScope), 400, "invalid_scope");
     }
@@ -154,9 +151,9 @@ class TokenExchangeIT extends IntegrationTestBase {
         TestAgent agent = registerAgent("support-bot");
         String delegationToken = delegationToken(agent, "orders:read");
 
-        Map<String, String> otherResource = exchangeForm(agent, delegationToken, "orders:read");
+        Map<String, String> otherResource = exchangeForm(agent, delegationToken, "orders:read", read("1042"));
         otherResource.put("resource", "https://payments.example");
-        Map<String, String> noResource = exchangeForm(agent, delegationToken, "orders:read");
+        Map<String, String> noResource = exchangeForm(agent, delegationToken, "orders:read", read("1042"));
         noResource.remove("resource");
 
         assertError(postForm("/oauth2/token", otherResource), 400, "invalid_target");
@@ -166,9 +163,9 @@ class TokenExchangeIT extends IntegrationTestBase {
     @Test
     void anAccessTokenCannotBeExchangedForAnother() {
         TestAgent agent = registerAgent("support-bot");
-        String accessToken = exchange(agent, delegationToken(agent, "orders:read"), "orders:read").string("access_token");
+        String accessToken = exchangeRead(agent, delegationToken(agent, "orders:read")).string("access_token");
 
-        assertError(exchange(agent, accessToken, "orders:read"), 400, "invalid_grant");
+        assertError(exchangeRead(agent, accessToken), 400, "invalid_grant");
     }
 
     @Test
@@ -179,7 +176,7 @@ class TokenExchangeIT extends IntegrationTestBase {
                 .param("id", delegation.string("delegation_id"))
                 .update();
 
-        assertError(exchange(agent, delegation.string("delegation_token"), "orders:read"), 400, "invalid_grant");
+        assertError(exchangeRead(agent, delegation.string("delegation_token")), 400, "invalid_grant");
     }
 
     @Test
@@ -188,13 +185,13 @@ class TokenExchangeIT extends IntegrationTestBase {
         String delegationToken = delegationToken(agent, "orders:read");
         String tampered = delegationToken.substring(0, delegationToken.lastIndexOf('.')) + ".AAAA";
 
-        assertError(exchange(agent, tampered, "orders:read"), 400, "invalid_grant");
+        assertError(exchangeRead(agent, tampered), 400, "invalid_grant");
     }
 
     @Test
     void malformedAuthorizationDetailsAreRejected() {
         TestAgent agent = registerAgent("support-bot");
-        Map<String, String> form = exchangeForm(agent, delegationToken(agent, "orders:refund"), "orders:refund");
+        Map<String, String> form = exchangeForm(agent, delegationToken(agent, "orders:refund"), "orders:refund", refund("1042", 3000));
         form.put("authorization_details", "{\"type\":\"refund\"}");
 
         assertError(postForm("/oauth2/token", form), 400, "invalid_authorization_details");

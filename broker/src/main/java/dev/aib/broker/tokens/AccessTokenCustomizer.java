@@ -71,6 +71,7 @@ class AccessTokenCustomizer implements OAuth2TokenCustomizer<JwtEncodingContext>
         } catch (ExchangeRules.Denied denied) {
             throw error(denied.code(), denied.getMessage());
         }
+        GrantHolder.set(grant);
 
         context.getJwsHeader().type(ACCESS_TOKEN_TYPE);
         context.getClaims()
@@ -79,10 +80,8 @@ class AccessTokenCustomizer implements OAuth2TokenCustomizer<JwtEncodingContext>
                 .claim("scope", String.join(" ", grant.scopes()))
                 .claim("client_id", delegation.agentId())
                 .claim("act", Map.of("sub", delegation.agentId()))
-                .claim("delegation_id", delegation.id());
-        if (!grant.authorizationDetails().isEmpty()) {
-            context.getClaims().claim("authorization_details", grant.authorizationDetails());
-        }
+                .claim("delegation_id", delegation.id())
+                .claim("authorization_details", grant.authorizationDetails());
     }
 
     private static OAuth2AuthenticationException error(String code, String description) {

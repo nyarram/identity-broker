@@ -25,8 +25,12 @@ services:
         SERVICE: broker
     environment:
       BROKER_DB_URL: jdbc:postgresql://postgres:5432/broker
-      BROKER_DB_USER: broker
-      BROKER_DB_PASSWORD: ${POSTGRES_PASSWORD:-broker-dev-password}
+      # Flyway migrates as the owner; the broker itself runs as broker_app, which can
+      # insert and read audit events but never change them
+      BROKER_DB_OWNER_USER: broker
+      BROKER_DB_OWNER_PASSWORD: ${POSTGRES_PASSWORD:-broker-dev-password}
+      BROKER_DB_APP_USER: broker_app
+      BROKER_DB_APP_PASSWORD: ${BROKER_DB_APP_PASSWORD:-broker-app-dev-password}
       BROKER_ISSUER: ${BROKER_ISSUER:-http://broker:9000}
       BROKER_ADMIN_TOKEN: ${BROKER_ADMIN_TOKEN:-dev-admin-token-not-for-production}
       BROKER_SIGNING_KEY_FILE: /var/lib/broker/signing-key.json

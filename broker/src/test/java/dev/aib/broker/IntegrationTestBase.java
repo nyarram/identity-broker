@@ -25,11 +25,11 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.test.web.server.LocalServerPort;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /** Runs the broker on a random port against a real Postgres, and talks to it over HTTP. */
@@ -39,7 +39,6 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
             "broker.issuer=" + IntegrationTestBase.ISSUER,
             "broker.admin-token=" + IntegrationTestBase.ADMIN_TOKEN
         })
-@Import(IntegrationTestBase.Containers.class)
 public abstract class IntegrationTestBase {
 
     public static final String ISSUER = "http://broker.test";
@@ -50,13 +49,29 @@ public abstract class IntegrationTestBase {
     static final String JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt";
     static final String JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
-    @TestConfiguration(proxyBeanMethods = false)
-    static class Containers {
-        @Bean
-        @ServiceConnection
-        PostgreSQLContainer postgres() {
-            return new PostgreSQLContainer("postgres:16-alpine");
-        }
+    static final String APP_DB_USER = "broker_app";
+    static final String APP_DB_PASSWORD = "broker_app_test";
+
+    /** One database for all test classes, started once and removed when the JVM exits. */
+    protected static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:16-alpine");
+
+    static {
+        POSTGRES.start();
+    }
+
+    /** As in production: Flyway runs as the owner, the broker as the restricted app role. */
+    @DynamicPropertySource
+    static void database(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        registry.add("spring.datasource.username", () -> APP_DB_USER);
+        registry.add("spring.datasource.password", () -> APP_DB_PASSWORD);
+        registry.add("spring.flyway.user", POSTGRES::getUsername);
+        registry.add("spring.flyway.password", POSTGRES::getPassword);
+    }
+
+    /** A connection as the schema owner, for tests that play an attacker with database access. */
+    protected static JdbcClient ownerJdbc() {
+        return JdbcClient.create(new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword()));
     }
 
     public record Response(int status, Map<String, Object> json) {
@@ -77,6 +92,10 @@ public abstract class IntegrationTestBase {
 
     protected Response get(String path) {
         return send(HttpRequest.newBuilder(uri(path)).GET());
+    }
+
+    protected Response getAsAdmin(String path) {
+        return send(HttpRequest.newBuilder(uri(path)).header("Authorization", "Bearer " + ADMIN_TOKEN).GET());
     }
 
     protected Response postJson(String path, Map<String, Object> body, String bearer) {
@@ -152,7 +171,7 @@ public abstract class IntegrationTestBase {
     }
 
     /** The full set of token exchange parameters; tests override individual entries. */
-    protected Map<String, String> exchangeForm(TestAgent agent, String subjectToken, String scope) {
+    protected Map<String, String> exchangeForm(TestAgent agent, String subjectToken, String scope, String details) {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("grant_type", TOKEN_EXCHANGE);
         form.put("client_id", agent.id());
@@ -162,11 +181,31 @@ public abstract class IntegrationTestBase {
         form.put("subject_token_type", JWT_TOKEN_TYPE);
         form.put("resource", ORDERS);
         form.put("scope", scope);
+        form.put("authorization_details", details);
         return form;
     }
 
-    protected Response exchange(TestAgent agent, String subjectToken, String scope) {
-        return postForm("/oauth2/token", exchangeForm(agent, subjectToken, scope));
+    protected Response exchange(TestAgent agent, String subjectToken, String scope, String details) {
+        return postForm("/oauth2/token", exchangeForm(agent, subjectToken, scope, details));
+    }
+
+    /** The usual request in tests: read order 1042, the delegation's task order. */
+    protected Response exchangeRead(TestAgent agent, String subjectToken) {
+        return exchange(agent, subjectToken, "orders:read", read("1042"));
+    }
+
+    // ---- authorization_details ----
+
+    protected static String read(String orderId) {
+        return "[{\"type\":\"read\",\"order_id\":\"" + orderId + "\"}]";
+    }
+
+    protected static String refund(String orderId, long maxAmountCents) {
+        return "[{\"type\":\"refund\",\"order_id\":\"" + orderId + "\",\"max_amount_cents\":" + maxAmountCents + "}]";
+    }
+
+    protected static String delete(String orderId) {
+        return "[{\"type\":\"delete\",\"order_id\":\"" + orderId + "\"}]";
     }
 
     // ---- Keys and assertions ----

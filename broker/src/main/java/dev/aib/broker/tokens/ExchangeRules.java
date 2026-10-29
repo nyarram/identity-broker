@@ -3,19 +3,21 @@ package dev.aib.broker.tokens;
 import com.nimbusds.jose.util.JSONArrayUtils;
 import dev.aib.broker.config.BrokerProperties;
 import dev.aib.broker.delegations.Delegation;
+import dev.aib.broker.policy.ActionRequest;
+import dev.aib.broker.policy.ActionRequest.Action;
+import dev.aib.broker.policy.PolicyEngine;
+import dev.aib.broker.policy.PolicyEngine.Decision;
 import java.text.ParseException;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
 import org.springframework.stereotype.Component;
 
 /**
  * Decides what a token exchange may grant. Spring Authorization Server checks the client
- * and the subject token; these rules bind the result to the delegation. Policy evaluation
- * (Cedar) is added in M2.
+ * and the subject token; these rules bind the result to the delegation and the policy.
+ * Each token is for exactly one action, described by one authorization_details entry.
  */
 @Component
 public class ExchangeRules {
@@ -32,8 +34,14 @@ public class ExchangeRules {
     public record Grant(
             String audience,
             Set<String> scopes,
-            List<Map<String, Object>> authorizationDetails,
-            Instant expiresAt) {}
+            ActionRequest action,
+            Instant expiresAt,
+            String policyReason) {
+
+        public List<Map<String, Object>> authorizationDetails() {
+            return List.of(action.toAuthorizationDetail());
+        }
+    }
 
     /** A refused exchange, carrying the OAuth error code to return. */
     public static class Denied extends RuntimeException {
@@ -50,9 +58,11 @@ public class ExchangeRules {
     }
 
     private final BrokerProperties properties;
+    private final PolicyEngine policy;
 
-    ExchangeRules(BrokerProperties properties) {
+    ExchangeRules(BrokerProperties properties, PolicyEngine policy) {
         this.properties = properties;
+        this.policy = policy;
     }
 
     /**
@@ -80,46 +90,97 @@ public class ExchangeRules {
             throw new Denied("invalid_target", "Agent may not request tokens for " + resource);
         }
 
-        Set<String> scopes = new TreeSet<>(request.scopes());
-        if (scopes.isEmpty()) {
+        if (request.scopes().isEmpty()) {
             throw new Denied("invalid_scope", "scope is required");
         }
-        if (!delegation.scopes().containsAll(scopes)) {
+        ActionRequest action = parseAction(request.authorizationDetails());
+        String scope = action.action().scope();
+        if (!request.scopes().equals(Set.of(scope))) {
+            throw new Denied("invalid_scope", "A token for " + action.action().type() + " must request exactly " + scope);
+        }
+        if (!delegation.scopes().contains(scope)) {
             throw new Denied("invalid_scope", "Requested scope exceeds the delegation");
         }
-        if (!known.get().scopes().containsAll(scopes)) {
+        if (!known.get().scopes().contains(scope)) {
             throw new Denied("invalid_scope", "Requested scope is not valid for " + resource);
+        }
+
+        Decision decision = policy.evaluate(request.agentId(), action, delegation.taskScope());
+        switch (decision.outcome()) {
+            case PERMIT -> {}
+            // M3 turns this into authorization_pending with an approval request
+            case APPROVAL_REQUIRED -> throw new Denied("access_denied", decision.reason());
+            case DENY -> throw new Denied("access_denied", decision.reason());
         }
 
         // A token never outlives the delegation it came from
         Instant expiresAt = defaultExpiry.isBefore(delegation.expiresAt()) ? defaultExpiry : delegation.expiresAt();
 
-        return new Grant(resource, scopes, parseAuthorizationDetails(request.authorizationDetails()), expiresAt);
+        return new Grant(resource, Set.of(scope), action, expiresAt, decision.reason());
     }
 
-    /** Structural checks only for RFC 9396 authorization_details; M2 checks values against policy. */
-    static List<Map<String, Object>> parseAuthorizationDetails(String json) {
+    /** Parses the single RFC 9396 authorization_details entry; unknown fields are rejected. */
+    static ActionRequest parseAction(String json) {
         if (json == null || json.isBlank()) {
-            return List.of();
+            throw invalidDetails("authorization_details is required and must describe the one action this token is for");
         }
         if (json.length() > MAX_AUTHORIZATION_DETAILS_LENGTH) {
-            throw new Denied("invalid_authorization_details", "authorization_details is too large");
+            throw invalidDetails("authorization_details is too large");
         }
         List<Object> entries;
         try {
             entries = JSONArrayUtils.parse(json);
         } catch (ParseException e) {
-            throw new Denied("invalid_authorization_details", "authorization_details must be a JSON array");
+            throw invalidDetails("authorization_details must be a JSON array");
         }
-        List<Map<String, Object>> details = new ArrayList<>();
-        for (Object entry : entries) {
-            if (!(entry instanceof Map<?, ?> map) || !(map.get("type") instanceof String type) || type.isBlank()) {
-                throw new Denied("invalid_authorization_details", "Each authorization_details entry needs a type");
+        if (entries.size() != 1 || !(entries.getFirst() instanceof Map<?, ?> entry)) {
+            throw invalidDetails("authorization_details must contain exactly one object");
+        }
+        if (!(entry.get("type") instanceof String type)) {
+            throw invalidDetails("authorization_details entry needs a type");
+        }
+        Action action = Action.fromType(type).orElseThrow(() -> invalidDetails("Unknown authorization_details type: " + type));
+
+        return switch (action) {
+            case LIST -> {
+                allowOnly(entry, Set.of("type", "customer_id"));
+                yield new ActionRequest(action, null, requireString(entry, "customer_id"), 0);
             }
-            @SuppressWarnings("unchecked")
-            Map<String, Object> typed = (Map<String, Object>) map;
-            details.add(typed);
+            case REFUND -> {
+                allowOnly(entry, Set.of("type", "order_id", "max_amount_cents"));
+                yield new ActionRequest(action, requireString(entry, "order_id"), null, requirePositiveCents(entry));
+            }
+            default -> {
+                allowOnly(entry, Set.of("type", "order_id"));
+                yield new ActionRequest(action, requireString(entry, "order_id"), null, 0);
+            }
+        };
+    }
+
+    private static void allowOnly(Map<?, ?> entry, Set<String> allowed) {
+        for (Object key : entry.keySet()) {
+            if (!allowed.contains(key)) {
+                throw invalidDetails("Unexpected authorization_details field: " + key);
+            }
         }
-        return details;
+    }
+
+    private static String requireString(Map<?, ?> entry, String field) {
+        if (!(entry.get(field) instanceof String value) || value.isBlank()) {
+            throw invalidDetails("authorization_details needs " + field);
+        }
+        return value;
+    }
+
+    private static long requirePositiveCents(Map<?, ?> entry) {
+        Object value = entry.get("max_amount_cents");
+        if (!(value instanceof Long || value instanceof Integer) || ((Number) value).longValue() <= 0) {
+            throw invalidDetails("max_amount_cents must be a positive whole number of cents");
+        }
+        return ((Number) value).longValue();
+    }
+
+    private static Denied invalidDetails(String description) {
+        return new Denied("invalid_authorization_details", description);
     }
 }

@@ -20,8 +20,8 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
- * Scope checks happen in {@link SecurityConfig}. M2 adds authorization_details checks on
- * refunds; M3 adds introspection before every write.
+ * Scope checks happen in {@link SecurityConfig}; each handler then checks the token's
+ * authorization_details ({@link TokenGrant}). M3 adds introspection before every write.
  */
 @RestController
 @RequestMapping("/orders")
@@ -47,23 +47,29 @@ class OrdersController {
         this.orders = orders;
     }
 
+    // Each handler checks the token's grant before looking the order up, so a token for one
+    // order cannot even learn whether another order exists.
+
     @GetMapping("/{id}")
-    Order get(@PathVariable String id) {
-        return orders.find(id).orElseThrow(() -> notFound(id));
+    Order get(@PathVariable String id, @AuthenticationPrincipal Jwt jwt) {
+        TokenGrant.of(jwt).requireOrder("read", id);
+        return find(id);
     }
 
     @GetMapping
-    List<Order> list(@RequestParam String customer) {
+    List<Order> list(@RequestParam String customer, @AuthenticationPrincipal Jwt jwt) {
+        TokenGrant.of(jwt).requireCustomerList(customer);
         return orders.findByCustomer(customer);
     }
 
     @PostMapping("/{id}/refund")
     WriteResult refund(@PathVariable String id, @RequestBody RefundRequest request, @AuthenticationPrincipal Jwt jwt) {
-        Order order = get(id);
         Long amount = request.amountCents();
         if (amount == null || amount <= 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "amount_cents must be positive");
         }
+        TokenGrant.of(jwt).requireRefund(id, amount);
+        Order order = find(id);
         if (amount > order.refundableCents()) {
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Refund exceeds the refundable amount");
         }
@@ -73,7 +79,8 @@ class OrdersController {
 
     @PostMapping("/{id}/cancel")
     WriteResult cancel(@PathVariable String id, @AuthenticationPrincipal Jwt jwt) {
-        if (get(id).status() == Order.Status.CANCELLED) {
+        TokenGrant.of(jwt).requireOrder("cancel", id);
+        if (find(id).status() == Order.Status.CANCELLED) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Order is already cancelled");
         }
         Order updated = orders.update(id, Order::cancelled).orElseThrow(() -> notFound(id));
@@ -83,10 +90,15 @@ class OrdersController {
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     void delete(@PathVariable String id, @AuthenticationPrincipal Jwt jwt) {
+        TokenGrant.of(jwt).requireOrder("delete", id);
         if (!orders.delete(id)) {
             throw notFound(id);
         }
         log.info("delete order {} by agent {} for user {}", id, PerformedBy.of(jwt).agent(), jwt.getSubject());
+    }
+
+    private Order find(String id) {
+        return orders.find(id).orElseThrow(() -> notFound(id));
     }
 
     private static WriteResult audit(String action, Order order, Jwt jwt) {
